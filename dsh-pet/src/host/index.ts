@@ -44,6 +44,14 @@
  *                                       pets.<id>.anim；效果与右键「动作」菜单一致，供其他插件调用）
  *   /dsh-pet-7340/chat                 → 对话与记忆（GET 最近窗口 / POST 对话并写 memory.json；
  *                                       POST 只回 {ok}，回复同样写 S 的 pets.<id>.say）
+ *   /dsh-pet-7340/relays               → 中转站管理（GET 脱敏列表 / POST 新建）
+ *   /dsh-pet-7340/relays/{id}          → PUT 更新 / DELETE 删除（删站点同时删凭证）
+ *   /dsh-pet-7340/relays/refresh-all   → POST 并发刷新全部启用站点
+ *   /dsh-pet-7340/relays/{id}/refresh  → POST 刷新该站余额（RelayBalanceResult）
+ *   /dsh-pet-7340/relays/{id}/health   → POST 连通性探测（RelayHealthResult）
+ *   /dsh-pet-7340/relays/{id}/manual-balance → POST 设置/清除手工余额（降级路径）
+ *                                       凭证只进 relay-credentials.json；每个响应体返回前
+ *                                       过脱敏自检，检出明文凭证即失败
  *   /dsh-pet-7340/font|pic             → 字体 / 通知图标素材
  *
  * 系统通知不属于宠物行为、不在这里的旧实现是：浏览器半侧 notify.ts 经 connection 事件流
@@ -111,6 +119,29 @@ import {
 import { profileNameFrom, storageEntries } from './storage-paths';
 import { PollStateStore } from './state';
 import { timeContextOf } from './time-context';
+import { aggregateBalances, checkSiteHealth, queryAllBalances, querySiteBalance } from './relays/index';
+import {
+  assertNoSecret,
+  collectSecrets,
+  normalizeManualBalance,
+  parseCredential,
+  parseRelayRoute,
+  relayError,
+} from './relays/routes';
+import {
+  clearCredential,
+  getCredential,
+  loadCredentials,
+  loadSites,
+  putCredential,
+  removeSite,
+  saveSites,
+  siteViews,
+  toSiteView,
+  upsertSite,
+  type SiteInput,
+} from './relays/store';
+import type { RelayCredential, RelaySite } from './relays/types';
 import {
   HelperProcess,
   defaultElectronExe,
@@ -267,6 +298,10 @@ export function apply(ctx: any): void {
   const userConfigPath = join(userRoot, 'main-config.jsonc');
   const legacyUserConfigPath = join(userRoot, 'main-config.json');
   const petConfigDir = join(userRoot, 'pet');
+  // 中转站数据目录（站点 relays.json + 凭证 relay-credentials.json）。
+  // 与 pet/、main-animation/ 同规矩：挂在同一个用户数据根下，由 relays/store.ts 的
+  // 可注入 dir 参数消费 —— 不另起基准目录，也不读任何全局状态（否则没法单测）。
+  const relayDir = join(userRoot, 'relays');
   // 配置路径集（readAllConfig 的唯一输入：内置默认 + 用户主配置 + 文件宠物目录）
   const configPaths: ConfigPaths = {
     defaultFile: join(PACKAGE_ROOT, 'assets', 'config.jsonc'),
@@ -638,6 +673,63 @@ export function apply(ctx: any): void {
         }),
       );
     }
+    // 中转站（sections.relays）：有启用站点就一起刷。与上面的单服务商链路**并存**——
+    // DSH 宿主下仍旧查它自己的 provider，这里只是在同一拍里多喂一叶。
+    // 自己的 try/catch 在 refreshRelays 内，失败不会影响上面已经写好的 balance 叶。
+    if (hasEnabledRelaySites()) await refreshRelays();
+  };
+
+  /**
+   * 有没有「启用中」的中转站。
+   *
+   * 读盘失败（`relays.json` 损坏）→ 返回 false：store 已经会把坏文件改名留存并抛错，
+   * 这里再把它写进状态叶只会每周期重复报一次同一条错，没有信息量。
+   */
+  const hasEnabledRelaySites = (): boolean => {
+    try {
+      return loadSites(relayDir).some((s) => s.enabled === true);
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * 刷新中转站状态叶 `sections.relays`。
+   *
+   * 与 `sections.balance` **并存，互不改动**：前者是 DSH 宿主的单服务商余额（原链路一字不动），
+   * 后者是 N 个中转站的舰队汇总 + 各站健康 + 最近刷新时间。两者由调用方按各自前置条件分流
+   * （见下方 balance poll：没有启用余额的宠物就不查单服务商；没有启用站点就不查中转站）。
+   *
+   * 一个启用站点都没有时**不写这一叶**：`data` 保持 null，前端据此区分「没有站点」
+   * 与「刷新失败」，也避免空跑把 counter 顶高、让前端每周期白渲染一次。
+   */
+  const refreshRelays = async (): Promise<void> => {
+    let sites: RelaySite[];
+    try {
+      sites = loadSites(relayDir).filter((s) => s.enabled === true);
+    } catch {
+      return;
+    }
+    if (sites.length === 0) return;
+    try {
+      // 余额与连通性并行跑：两者互不依赖，串行会让这一叶的刷新时间翻倍。
+      const [results, health] = await Promise.all([
+        queryAllBalances(relayDir, sites),
+        Promise.all(sites.map((s) => checkSiteHealth(relayDir, s))),
+      ]);
+      state.writeSection('relays', {
+        summary: aggregateBalances(sites, results),
+        sites: results,
+        health,
+        refreshedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      state.writeSection('relays', {
+        ok: false,
+        reason: 'fetch-error',
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
   };
 
   /** 当前交互桌宠 id：/pet 已选且仍存在 → 该宠物；未选/已失效 → 有效宠物列表第一只（进程内，重启回默认） */
@@ -848,6 +940,171 @@ export function apply(ctx: any): void {
 
   /** 用户动画根：按扩展名取子目录（main-animation/webm 或 main-animation/mov）。 */
   const userRootFor = (ext: string): string => join(thumbUserRoot, animSubdirFor(ext));
+
+  /**
+   * 中转站管理路由：`/dsh-pet-7340/relays[/{id}[/action]]`
+   *
+   *   GET    /relays                     全部站点脱敏视图（credential.masked，绝不明文）
+   *   POST   /relays                     新建站点（body = SiteInput + 可选 credential）
+   *   PUT    /relays/{id}                更新站点（可同时更新凭证）
+   *   DELETE /relays/{id}                删站点并删凭证
+   *   POST   /relays/{id}/refresh        刷新该站余额 → RelayBalanceResult
+   *   POST   /relays/refresh-all         并发刷新全部启用站点 → RelayBalanceResult[]
+   *   POST   /relays/{id}/health         连通性探测 → RelayHealthResult
+   *   POST   /relays/{id}/manual-balance 设置/清除手工余额（查不到时的降级路径）
+   *
+   * 两条硬口径（与上游既有分支逐条对齐，不新造）：
+   * 1. **凭证与站点分文件**：`credential` 只进 `relay-credentials.json`，站点文件里
+   *    没有任何密钥字段——导出/备份站点不会顺带泄密；
+   * 2. **每个响应体返回前过一遍脱敏自检**：检出明文凭证就抛错（该请求 500），
+   *    绝不把凭证送出去。宁可端点坏掉，不泄露。
+   *
+   * 错误口径：结构性参数错误（坏 JSON / 缺字段 / 未知路径 / 站点不存在）→ 4xx + `{ error }`；
+   * 与 `/config` `/pet-display` 的 `site not found` 同形。
+   */
+  const handleRelayRoute = async (rest: string, method: string, body?: string): Promise<RouteResult> => {
+    // 自检基线：数据目录下全部凭证明文（附加头的值同样算）
+    const secrets = collectSecrets(loadCredentials(relayDir));
+    /** 统一出口：自检通过才允许返回 */
+    const reply = (status: number, obj: unknown): RouteResult => {
+      assertNoSecret(obj, secrets);
+      return { kind: 'json', status, obj };
+    };
+    const parseBody = (): unknown => {
+      try {
+        return JSON.parse(body ?? 'null');
+      } catch {
+        return undefined;
+      }
+    };
+    const asObject = (raw: unknown): Record<string, unknown> =>
+      raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    /** body 的 credential 段：缺省 = 不动；显式 null = 清除；对象 = 校验后写入 */
+    const readCredential = (
+      o: Record<string, unknown>,
+    ): { ok: true; value?: RelayCredential; clear: boolean } | { ok: false; message: string } => {
+      if (!Object.prototype.hasOwnProperty.call(o, 'credential')) return { ok: true, clear: false };
+      const raw = o.credential;
+      if (raw === undefined || raw === null) return { ok: true, clear: true };
+      const parsed = parseCredential(raw);
+      return parsed.ok ? { ok: true, value: parsed.value, clear: false } : parsed;
+    };
+    /** 站点入参 = body 去掉 credential 段（凭证不走站点实体） */
+    const siteInputOf = (o: Record<string, unknown>): SiteInput => {
+      const input: Record<string, unknown> = { ...o };
+      delete input.credential;
+      // 强转是故意的：字段校验在 upsertSite → validateSiteInput 里做（缺 name/url/kind
+      // 会 throw，路由层把它翻成 400）。这里只负责把 credential 段摘掉。
+      return input as unknown as SiteInput;
+    };
+    const applyCredential = (siteId: string, value: RelayCredential | undefined, clear: boolean): void => {
+      if (value) putCredential(relayDir, siteId, value);
+      else if (clear) clearCredential(relayDir, siteId);
+    };
+    const findSite = (id: string): RelaySite | undefined => loadSites(relayDir).find((s) => s.id === id);
+
+    try {
+      const route = parseRelayRoute(rest);
+      if (route.action === 'unknown') return reply(404, relayError('unknown relays route: ' + rest));
+
+      // ---- /relays（GET 列表 / POST 新建）----
+      if (route.action === 'collection') {
+        if (method === 'GET') return reply(200, { ok: true, sites: siteViews(relayDir) });
+        if (method === 'POST') {
+          const raw = parseBody();
+          if (raw === undefined) return reply(400, relayError('invalid JSON body'));
+          const o = asObject(raw);
+          const cred = readCredential(o);
+          if (!cred.ok) return reply(400, relayError(cred.message));
+          const input = siteInputOf(o);
+          delete input.id; // POST 只新建；更新走 PUT（带 id 会被 upsertSite 当成更新）
+          let site: RelaySite;
+          try {
+            site = upsertSite(relayDir, input);
+          } catch (e) {
+            return reply(400, relayError(e instanceof Error ? e.message : String(e)));
+          }
+          applyCredential(site.id, cred.value, cred.clear);
+          return reply(200, { ok: true, site: toSiteView(site, getCredential(relayDir, site.id)) });
+        }
+        return reply(405, relayError('method not allowed'));
+      }
+
+      // ---- /relays/{id}（PUT 更新 / DELETE 删除）----
+      if (route.action === 'item') {
+        if (!findSite(route.id)) return reply(404, relayError('site not found: ' + route.id));
+        if (method === 'PUT') {
+          const raw = parseBody();
+          if (raw === undefined) return reply(400, relayError('invalid JSON body'));
+          const o = asObject(raw);
+          const cred = readCredential(o);
+          if (!cred.ok) return reply(400, relayError(cred.message));
+          let updated: RelaySite;
+          try {
+            updated = upsertSite(relayDir, { ...siteInputOf(o), id: route.id });
+          } catch (e) {
+            return reply(400, relayError(e instanceof Error ? e.message : String(e)));
+          }
+          applyCredential(updated.id, cred.value, cred.clear);
+          return reply(200, { ok: true, site: toSiteView(updated, getCredential(relayDir, updated.id)) });
+        }
+        if (method === 'DELETE') {
+          removeSite(relayDir, route.id); // 站点与凭证一起删（不留孤儿密钥文件）
+          return reply(200, { ok: true, sites: siteViews(relayDir) });
+        }
+        return reply(405, relayError('method not allowed'));
+      }
+
+      // ---- /relays/refresh-all（并发刷新全部启用站点）----
+      if (route.action === 'refresh-all') {
+        if (method !== 'POST') return reply(405, relayError('method not allowed'));
+        const enabled = loadSites(relayDir).filter((s) => s.enabled === true);
+        return reply(200, await queryAllBalances(relayDir, enabled));
+      }
+
+      // ---- /relays/{id}/refresh · /health · /manual-balance ----
+      if (route.action === 'refresh') {
+        if (method !== 'POST') return reply(405, relayError('method not allowed'));
+        const site = findSite(route.id);
+        if (!site) return reply(404, relayError('site not found: ' + route.id));
+        return reply(200, await querySiteBalance(relayDir, site));
+      }
+
+      if (route.action === 'health') {
+        if (method !== 'POST') return reply(405, relayError('method not allowed'));
+        const site = findSite(route.id);
+        if (!site) return reply(404, relayError('site not found: ' + route.id));
+        return reply(200, await checkSiteHealth(relayDir, site));
+      }
+
+      // 手工余额：查不到时的降级路径。空 amount = 清除（撤销降级）。
+      if (route.action === 'manual-balance') {
+        if (method !== 'POST') return reply(405, relayError('method not allowed'));
+        const raw = parseBody();
+        if (raw === undefined) return reply(400, relayError('invalid JSON body'));
+        const mb = normalizeManualBalance(raw);
+        if (!mb.ok) return reply(400, relayError(mb.message));
+        const sites = loadSites(relayDir);
+        const idx = sites.findIndex((s) => s.id === route.id);
+        if (idx < 0) return reply(404, relayError('site not found: ' + route.id));
+        if (mb.clear) {
+          delete sites[idx].manualBalance;
+        } else {
+          sites[idx] = {
+            ...sites[idx],
+            manualBalance: { amount: mb.amount, currency: mb.currency, updatedAt: new Date().toISOString() },
+          };
+        }
+        saveSites(relayDir, sites);
+        return reply(200, { ok: true, site: toSiteView(sites[idx], getCredential(relayDir, route.id)) });
+      }
+
+      return reply(404, relayError('unknown relays route: ' + rest));
+    } catch (e) {
+      // 脱敏自检失败、store 抛错（文件损坏）等 → 显式 500，不静默
+      return reply(500, relayError(e instanceof Error ? e.message : String(e)));
+    }
+  };
 
   /** 单次业务路由(WebServer 注册 → HTTP 落盘 / 桌面 Helper 管道 → scheme 应答,共用同一份实现):
    *  输入只需 rawUrl(/dsh-pet-7340/... + 查询) + method + body 文本;返回 RouteResult(JSON/文本/文件),
@@ -1255,6 +1512,13 @@ export function apply(ctx: any): void {
       }
     }
 
+    // 中转站管理：/dsh-pet-7340/relays[/{id}[/action]]（CRUD / 刷新 / 健康 / 手工余额）。
+    // 必须在下面 `rest.split('/')` 拆 scope **之前**拦下来：relays 之下还有子路径，
+    // 落进 thumb/pic/font 那套「scope + 剩余段」的分法会被当成未知 scope 回 400。
+    if (rest === 'relays' || rest.startsWith('relays/')) {
+      return handleRelayRoute(rest, method, body);
+    }
+
     // 动画文件：/dsh-pet-7340/thumb/<素材根>/<file>，扩展名 webm（默认）/ mov（macOS 定制）。
     // 素材归属按「是否存在该宠物的独立素材目录 `pet/<petId>-animation/`」判定：
     //   - 存在（pet pack 宠物）：只查自己的目录，查不到即 404 显式报错——绝不混用
@@ -1516,7 +1780,8 @@ export function apply(ctx: any): void {
 
   // 余额周期刷新：host 侧唯一定时器（前端不再有任何余额定时器）。
   // 周期**每次重新读配置** eventsRefreshSec.balance → 改了配置下一拍自然跟上。
-  // 没有任何启用余额的宠物时跳过查询：尊重配置，不白花外部 API 调用。
+  // 中转站（sections.relays）搭同一拍刷新，不另起定时器：没有启用余额的宠物时跳过
+  // 单服务商查询、没有启用站点时跳过中转站查询——尊重配置，不白花外部 API 调用。
   ctx.effect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1529,8 +1794,13 @@ export function apply(ctx: any): void {
       try {
         const cfg = readAllConfig(configPaths);
         sec = balancePeriodSec(cfg);
-        // 没有任何启用余额的宠物 → 不查（省外部调用）；配置改了下一拍自然跟上
+        // 分流（两者并存，互不改动）：单服务商余额（DSH 宿主原链路）与中转站余额各自按
+        // 自己的前置条件刷新 —— 没有启用余额的宠物就不查单服务商；没有启用站点就不查
+        // 中转站。都不白花外部 API 调用；配置改了下一拍自然跟上。
+        // 注意别刷两遍：refreshBalance 内部已经带了中转站（有启用站点时），所以这里用
+        // else-if —— 没有余额宠物时才单独刷中转站（独立模式下可能一只宠物都没配余额）。
         if (flattenPetList(cfg).some((p) => p.balanceEnabled === true)) await refreshBalance();
+        else if (hasEnabledRelaySites()) await refreshRelays();
       } catch {
         // 读配置抛错 = 安装损坏（readAllConfig 只在**内置默认**缺失/损坏时抛，用户层写坏只会告警回退）：
         // 不再重排——每 30 分钟重试一次没有意义，而且会白占一个常驻定时器。修好安装后重启 DSH 即可。

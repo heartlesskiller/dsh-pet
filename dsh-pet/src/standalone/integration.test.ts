@@ -13,7 +13,7 @@
  * 顺序上先监听、再 `apply` —— 与 CLI 完全一致：插件的 `launchHelper` 依赖
  * `ctx.webServer.port > 0`，端口为 0 时它只会 500ms 重试一次、永不拉起桌面窗口。
  */
-import { after, before, describe, test } from 'node:test';
+import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +21,7 @@ import { join } from 'node:path';
 
 import { packageRoot } from '../host/helper-process.ts';
 import { apply } from '../host/index.ts';
+import { putCredential, upsertSite } from '../host/relays/store.ts';
 import { createStandaloneContext, type RegisteredRoute, type StandaloneLogger } from './context.ts';
 import { configPathsFor } from './options.ts';
 import { listenStandaloneServer, type StandaloneServer } from './server.ts';
@@ -80,6 +81,17 @@ async function get(path: string): Promise<{ status: number; text: string; json: 
   return { status: response.status, text, json: () => JSON.parse(text) as unknown };
 }
 
+/** POST 一条插件路由（带 JSON body） */
+async function post(path: string, body?: unknown): Promise<{ status: number; text: string; json: () => unknown }> {
+  const response = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? '' : JSON.stringify(body),
+  });
+  const text = await response.text();
+  return { status: response.status, text, json: () => JSON.parse(text) as unknown };
+}
+
 describe('插件宿主半边在独立模式下跑起来了', () => {
   test('apply 注册了插件自己的路由前缀（独立模式不自己写路由表）', () => {
     const routes = context?.routes ?? [];
@@ -96,7 +108,7 @@ describe('插件宿主半边在独立模式下跑起来了', () => {
       sections: Record<string, { counter: number; data: unknown }>;
       pets: Record<string, unknown>;
     };
-    assert.deepEqual(Object.keys(body.sections).sort(), ['balance', 'notify', 'workStatus']);
+    assert.deepEqual(Object.keys(body.sections).sort(), ['balance', 'notify', 'relays', 'workStatus']);
     assert.equal(body.sections.balance?.counter, 0);
     assert.equal(body.sections.balance?.data, null);
     assert.deepEqual(body.pets, {});
@@ -159,5 +171,71 @@ describe('独立服务自己的端点', () => {
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { ok: true, stopping: true });
     assert.equal((await get('/dsh-pet-7340/state')).status, 200, '测试里没人真的停机：服务应继续可用');
+  });
+});
+
+describe('中转站在独立模式下可用（用户目标①：任何 agent 都能驱动）', () => {
+  /** 与 routes.test.ts 同理由：两个用例共用一个 home，不清场会互相看见对方建的站 */
+  beforeEach(() => {
+    rmSync(join(home, 'dsh-pet', 'relays'), { recursive: true, force: true });
+  });
+
+  /**
+   * 独立模式的 ctx 把 DSH 的 credentials / agentDefaultModel 降级成了结构化失败替身
+   * （见 ./context.ts）。中转站**不依赖那两个服务**：凭证读自己的 relay-credentials.json，
+   * 余额/健康走 providers/newapi.ts —— 所以独立模式下它们必须是真的可用，而不是降级。
+   * 这正是「桌宠不绑定 DSH 这一个宿主」的落地证据。
+   */
+  test('CRUD + 余额 + 健康在独立模式下全部可用（不靠 DSH 凭证服务）', async () => {
+    const relayDir = join(home, 'dsh-pet', 'relays');
+    const created = await post('/dsh-pet-7340/relays', {
+      name: '独立站', url: 'https://solo.example.com/', kind: 'new-api',
+      credential: { kind: 'access-token', secret: 'sk-solo-abcdef123456' },
+    });
+    assert.equal(created.status, 200);
+    const site = (created.json() as { site: { id: string; credential: { masked: string } } }).site;
+    assert.equal(created.text.includes('sk-solo-abcdef123456'), false, '独立模式同样不得泄漏明文凭证');
+
+    const list = await get('/dsh-pet-7340/relays');
+    assert.equal(list.status, 200);
+    assert.equal((list.json() as { sites: unknown[] }).sites.length, 1);
+
+    // 余额：manual 凭证 → 用手工值（不发请求，也不需要 DSH 的凭证服务）
+    const withManual = await post(`/dsh-pet-7340/relays/${site.id}/manual-balance`, { amount: '9.90', currency: 'USD' });
+    assert.equal(withManual.status, 200);
+    putCredential(relayDir, site.id, { kind: 'manual', secret: '' });
+    const balance = await post(`/dsh-pet-7340/relays/${site.id}/refresh`);
+    assert.equal(balance.status, 200);
+    const b = balance.json() as { ok: boolean; source: string; data: { total: string } };
+    assert.equal(b.ok, true);
+    assert.equal(b.source, 'manual');
+    assert.equal(b.data.total, '9.90');
+
+    // 健康：无凭证 → 明确报 unknown 并说明原因（不假装成功）
+    const health = await post(`/dsh-pet-7340/relays/${site.id}/health`);
+    assert.equal(health.status, 200);
+    assert.equal((health.json() as { health: string }).health, 'unknown');
+
+    // 删站点（凭证一起删）
+    assert.equal((await fetch(`${base}/dsh-pet-7340/relays/${site.id}`, { method: 'DELETE' })).status, 200);
+    assert.deepEqual(((await get('/dsh-pet-7340/relays')).json() as { sites: unknown[] }).sites, []);
+  });
+
+  test('sections.relays 与单服务商 balance 叶并存（互不覆盖）', async () => {
+    const relayDir = join(home, 'dsh-pet', 'relays');
+    const site = upsertSite(relayDir, {
+      name: '并存站', url: 'https://coexist.example.com', kind: 'new-api',
+      manualBalance: { amount: '2.00', currency: 'USD' },
+    });
+    putCredential(relayDir, site.id, { kind: 'manual', secret: '' });
+    await post('/dsh-pet-7340/balance');
+    const state = await get('/dsh-pet-7340/state');
+    const body = state.json() as {
+      sections: Record<string, { counter: number; data: Record<string, unknown> | null }>;
+    };
+    assert.ok(body.sections.balance.counter > 0, '单服务商链路照旧工作');
+    assert.ok(body.sections.relays.counter > 0, '中转站叶也被写上');
+    const data = body.sections.relays.data as { summary: { total: string } };
+    assert.equal(data.summary.total, '2.00');
   });
 });

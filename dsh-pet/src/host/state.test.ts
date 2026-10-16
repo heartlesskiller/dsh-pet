@@ -16,9 +16,10 @@ import assert from 'node:assert/strict';
 import { PollStateStore } from './state.ts';
 
 describe('PollStateStore —— 初始形态', () => {
-  test('三个全局叶子都是 {counter:0, data:null}（0 = 从未写过，前端首拉当基线）', () => {
+  test('全部全局叶子都是 {counter:0, data:null}（0 = 从未写过，前端首拉当基线）', () => {
     const s = new PollStateStore().read();
-    assert.deepEqual(Object.keys(s.sections).sort(), ['balance', 'notify', 'workStatus']);
+    // relays = 中转站状态叶（R2/R3 新增）。新增叶子必须同步这里——漏改会让前端拿不到新段。
+    assert.deepEqual(Object.keys(s.sections).sort(), ['balance', 'notify', 'relays', 'workStatus']);
     for (const leaf of Object.values(s.sections)) assert.deepEqual(leaf, { counter: 0, data: null });
     assert.deepEqual(s.pets, {});
   });

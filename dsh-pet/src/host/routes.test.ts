@@ -12,14 +12,15 @@
  *
  * 用 Node 内置 test runner（node:test），不引入任何 npm 依赖。
  */
-import { after, before, describe, test } from 'node:test';
+import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Writable } from 'node:stream';
 
 import { apply } from './index.ts';
+import { putCredential, upsertSite, type SiteInput } from './relays/store.ts';
 
 /** 用户根之外的诱饵内容：任何响应体出现它都说明越根读盘成功 */
 const SECRET = 'TOP-SECRET-BYTES';
@@ -41,6 +42,12 @@ let call: (url: string, method?: string, body?: string) => Promise<Result> = () 
   Promise.reject(new Error('未初始化'));
 let savedHome: string | undefined;
 let savedElectron: string | undefined;
+/** 中转站数据目录（= userRoot/relays，与 index.ts 的 relayDir 同口径） */
+let relayDir = '';
+/** 明文凭证：任何响应体出现它都说明脱敏自检失效 */
+const PLAIN_SECRET = 'sk-plaintext-abcdef123456';
+/** 脱敏后的样子（绝不当成明文） */
+const MASKED = 'sk-p****3456';
 /** apply() 注册的全部 effect 释放函数（after 里调用：否则常驻定时器会让测试进程不退出） */
 const disposers: Array<() => void> = [];
 
@@ -88,6 +95,8 @@ before(() => {
   process.env.DSH_HOME = home;
   // 命中一个已存在的文件：桌面 Helper 无论走哪条分支都不会真的下载/拉起
   process.env.DSH_PET_ELECTRON_PATH = process.execPath;
+  // 中转站数据目录：apply() 在 userRoot（= home/dsh-pet）下建 relays/
+  relayDir = join(home, 'dsh-pet', 'relays');
 
   let handler: ((req: unknown, res: unknown) => Promise<void>) | undefined;
   const noop = (): void => {};
@@ -198,7 +207,7 @@ describe('/state + /balance —— 轮询统一状态与余额动作端点', () 
       sections: Record<string, { counter: number; data: unknown }>;
       pets: Record<string, unknown>;
     };
-    assert.deepEqual(Object.keys(body.sections).sort(), ['balance', 'notify', 'workStatus']);
+    assert.deepEqual(Object.keys(body.sections).sort(), ['balance', 'notify', 'relays', 'workStatus']);
     assert.equal(body.sections.balance.counter, 0, '没人写过时 counter=0（前端首拉当基线）');
     assert.equal(body.sections.balance.data, null);
     assert.deepEqual(body.pets, {});
@@ -445,5 +454,188 @@ describe('pic/memes 路由 —— 素材根不得当路径片段（与 thumb 同
     const r = await call('/dsh-pet-7340/pic/memes/..%255C..%255C..%255Coutside-memes/leak.png');
     assert.equal(r.status, 404);
     assert.equal(r.body.includes(SECRET), false);
+  });
+});
+
+describe('/relays —— 中转站管理（CRUD / 刷新 / 健康 / 手工余额）', () => {
+  /**
+   * 每个用例都从空目录开始：整个文件共用一个 home（因而共用一个 relayDir），
+   * 不清场的话后面的用例会看见前面用例建的站，断言「列表为空 / 只刷启用站」就会假红。
+   * store 侧写盘时会自建目录，所以直接删掉整个 relayDir 是安全的。
+   */
+  beforeEach(() => {
+    rmSync(relayDir, { recursive: true, force: true });
+  });
+
+  /** 建一个站（凭证单独走凭证文件） */
+  function seedSite(over: Partial<SiteInput> = {}, credential?: { kind: 'access-token'; secret: string }): string {
+    const site = upsertSite(relayDir, { name: '甲站', url: 'https://a.example.com', kind: 'new-api', ...over });
+    if (credential) putCredential(relayDir, site.id, { ...credential });
+    return site.id;
+  }
+
+  test('GET /relays：空目录 → 200 + { ok:true, sites:[] }', async () => {
+    const r = await call('/dsh-pet-7340/relays');
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(r.body), { ok: true, sites: [] });
+  });
+
+  test('POST /relays：新建站点 + 凭证；响应只带掩码，站点文件里没有任何密钥字段', async () => {
+    const r = await call('/dsh-pet-7340/relays', 'POST', JSON.stringify({
+      name: '甲站', url: 'https://a.example.com/', kind: 'new-api',
+      credential: { kind: 'access-token', secret: PLAIN_SECRET },
+    }));
+    assert.equal(r.status, 200);
+    const body = JSON.parse(r.body) as { ok: boolean; site: { id: string; url: string; credential: { masked: string; present: boolean } } };
+    assert.equal(body.ok, true);
+    assert.equal(body.site.url, 'https://a.example.com', 'URL 归一化去掉尾斜杠');
+    assert.equal(body.site.credential.present, true);
+    assert.equal(body.site.credential.masked, MASKED);
+    assert.equal(r.body.includes(PLAIN_SECRET), false, '响应体不得出现明文凭证');
+
+    // 站点文件（relays.json）里不允许出现 secret 字段；凭证另存一份
+    const sites = JSON.parse(readFileSync(join(relayDir, 'relays.json'), 'utf8')) as Array<Record<string, unknown>>;
+    assert.equal(sites.length, 1);
+    assert.equal('secret' in sites[0], false, '站点文件不得含密钥字段');
+    const creds = JSON.parse(readFileSync(join(relayDir, 'relay-credentials.json'), 'utf8')) as Record<string, { secret: string }>;
+    assert.equal(creds[body.site.id].secret, PLAIN_SECRET, '凭证只进凭证文件');
+  });
+
+  test('POST /relays：坏 JSON / 缺名称 / 未知类型 → 400 + { error }（不落脏数据）', async () => {
+    assert.equal((await call('/dsh-pet-7340/relays', 'POST', '{ not json')).status, 400);
+    const noName = await call('/dsh-pet-7340/relays', 'POST', JSON.stringify({ url: 'https://x.example.com', kind: 'new-api' }));
+    assert.equal(noName.status, 400);
+    assert.ok((JSON.parse(noName.body) as { error: string }).error.includes('名称'));
+    const badKind = await call('/dsh-pet-7340/relays', 'POST', JSON.stringify({ name: 'x', url: 'https://x.example.com', kind: 'bogus' }));
+    assert.equal(badKind.status, 400);
+    // 一个都没写进去
+    assert.deepEqual(JSON.parse((await call('/dsh-pet-7340/relays')).body), { ok: true, sites: [] });
+  });
+
+  test('POST /relays：不带 credential 也能建（之后报 credential-missing，不伪造 0）', async () => {
+    const r = await call('/dsh-pet-7340/relays', 'POST', JSON.stringify({ name: '无凭证站', url: 'https://b.example.com', kind: 'new-api' }));
+    assert.equal(r.status, 200);
+    const site = (JSON.parse(r.body) as { site: { id: string; credential: { present: boolean } } }).site;
+    assert.equal(site.credential.present, false);
+    const refresh = await call(`/dsh-pet-7340/relays/${site.id}/refresh`, 'POST');
+    assert.equal(refresh.status, 200);
+    assert.deepEqual(JSON.parse(refresh.body), {
+      ok: false, siteId: site.id, provider: 'relay:new-api', reason: 'credential-missing', message: '未配置凭证',
+    });
+  });
+
+  test('PUT /relays/{id}：更新站点；credential:null 清除凭证', async () => {
+    const id = seedSite(undefined, { kind: 'access-token', secret: PLAIN_SECRET });
+    const upd = await call(`/dsh-pet-7340/relays/${id}`, 'PUT', JSON.stringify({ name: '改名了', url: 'https://a.example.com', kind: 'new-api', lowThreshold: '2.00' }));
+    assert.equal(upd.status, 200);
+    const site = (JSON.parse(upd.body) as { site: { name: string; lowThreshold: string; credential: { present: boolean } } }).site;
+    assert.equal(site.name, '改名了');
+    assert.equal(site.lowThreshold, '2.00');
+    assert.equal(site.credential.present, true, '没传 credential 不动原凭证');
+
+    const cleared = await call(`/dsh-pet-7340/relays/${id}`, 'PUT', JSON.stringify({ name: '改名了', url: 'https://a.example.com', kind: 'new-api', credential: null }));
+    assert.equal(cleared.status, 200);
+    assert.equal((JSON.parse(cleared.body) as { site: { credential: { present: boolean } } }).site.credential.present, false);
+  });
+
+  test('DELETE /relays/{id}：站点与凭证一起删（不留孤儿密钥）', async () => {
+    const id = seedSite(undefined, { kind: 'access-token', secret: PLAIN_SECRET });
+    const r = await call(`/dsh-pet-7340/relays/${id}`, 'DELETE');
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(r.body), { ok: true, sites: [] });
+    const creds = JSON.parse(readFileSync(join(relayDir, 'relay-credentials.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal(id in creds, false, '凭证必须跟着站点一起删');
+  });
+
+  test('未知路径 / 未知站点 / 方法不对 → 404 或 405，都不静默', async () => {
+    assert.equal((await call('/dsh-pet-7340/relays/a/b/c')).status, 404);
+    assert.equal((await call('/dsh-pet-7340/relays/nope', 'DELETE')).status, 404);
+    assert.equal((await call('/dsh-pet-7340/relays/nope/refresh', 'POST')).status, 404);
+    assert.equal((await call('/dsh-pet-7340/relays', 'PATCH')).status, 405);
+    assert.equal((await call('/dsh-pet-7340/relays/x/refresh', 'GET')).status, 405);
+  });
+
+  test('POST /relays/{id}/refresh：manual 凭证 → 用手工值并标注 source=manual（不发请求）', async () => {
+    const id = seedSite({ manualBalance: { amount: '3.02', currency: 'USD' } });
+    putCredential(relayDir, id, { kind: 'manual', secret: '' });
+    const r = await call(`/dsh-pet-7340/relays/${id}/refresh`, 'POST');
+    assert.equal(r.status, 200);
+    const body = JSON.parse(r.body) as { ok: boolean; source: string; data: { total: string; currency: string } };
+    assert.equal(body.ok, true);
+    assert.equal(body.source, 'manual');
+    assert.equal(body.data.total, '3.02');
+    assert.equal(body.data.currency, 'USD');
+  });
+
+  test('POST /relays/refresh-all：只刷启用站点，返回 RelayBalanceResult 数组', async () => {
+    const on = seedSite({ name: '启用站', manualBalance: { amount: '1.00', currency: 'USD' } });
+    putCredential(relayDir, on, { kind: 'manual', secret: '' });
+    seedSite({ name: '停用站', enabled: false });
+    const r = await call('/dsh-pet-7340/relays/refresh-all', 'POST');
+    assert.equal(r.status, 200);
+    const list = JSON.parse(r.body) as Array<{ siteId: string; ok: boolean }>;
+    assert.equal(list.length, 1, '停用站点不得参与刷新');
+    assert.equal(list[0].siteId, on);
+  });
+
+  test('POST /relays/{id}/health：无凭证 → unknown + 「跳过探测」，不发请求', async () => {
+    const id = seedSite();
+    const r = await call(`/dsh-pet-7340/relays/${id}/health`, 'POST');
+    assert.equal(r.status, 200);
+    const body = JSON.parse(r.body) as { health: string; message: string };
+    assert.equal(body.health, 'unknown');
+    assert.ok(body.message.includes('未配置凭证'));
+  });
+
+  test('POST /relays/{id}/manual-balance：设置 / 清除 / 非法金额', async () => {
+    const id = seedSite();
+    const set = await call(`/dsh-pet-7340/relays/${id}/manual-balance`, 'POST', JSON.stringify({ amount: '5.50', currency: 'usd' }));
+    assert.equal(set.status, 200);
+    const site = (JSON.parse(set.body) as { site: { manualBalance: { amount: string; currency: string } } }).site;
+    assert.equal(site.manualBalance.amount, '5.50');
+    assert.equal(site.manualBalance.currency, 'USD', '币种统一大写');
+
+    assert.equal((await call(`/dsh-pet-7340/relays/${id}/manual-balance`, 'POST', JSON.stringify({ amount: 'abc' }))).status, 400);
+    assert.equal((await call(`/dsh-pet-7340/relays/${id}/manual-balance`, 'POST', JSON.stringify({ amount: '1.234' }))).status, 400);
+    assert.equal((await call(`/dsh-pet-7340/relays/${id}/manual-balance`, 'POST', JSON.stringify({ amount: '1.00' }))).status, 400);
+
+    const cleared = await call(`/dsh-pet-7340/relays/${id}/manual-balance`, 'POST', JSON.stringify({ amount: '' }));
+    assert.equal(cleared.status, 200);
+    assert.equal((JSON.parse(cleared.body) as { site: { manualBalance?: unknown } }).site.manualBalance, undefined);
+  });
+
+  test('脱敏自检：响应体任何一层都不出现明文凭证', async () => {
+    const id = seedSite(undefined, { kind: 'access-token', secret: PLAIN_SECRET });
+    for (const [url, method] of [
+      ['/dsh-pet-7340/relays', 'GET'],
+      ['/dsh-pet-7340/relays', 'POST'],
+      [`/dsh-pet-7340/relays/${id}`, 'PUT'],
+      [`/dsh-pet-7340/relays/${id}/refresh`, 'POST'],
+      ['/dsh-pet-7340/relays/refresh-all', 'POST'],
+      [`/dsh-pet-7340/relays/${id}/health`, 'POST'],
+      [`/dsh-pet-7340/relays/${id}/manual-balance`, 'POST'],
+    ] as Array<[string, string]>) {
+      const r = await call(url, method, JSON.stringify({ name: '自检站', url: 'https://c.example.com', kind: 'new-api', credential: { kind: 'access-token', secret: PLAIN_SECRET } }));
+      assert.equal(r.body.includes(PLAIN_SECRET), false, `${method} ${url} 泄漏了明文凭证`);
+    }
+  });
+
+  test('POST /balance 一并喂 sections.relays（与单服务商 balance 叶并存）', async () => {
+    const id = seedSite({ name: '甲站', manualBalance: { amount: '7.00', currency: 'USD' } });
+    putCredential(relayDir, id, { kind: 'manual', secret: '' });
+    await call('/dsh-pet-7340/balance', 'POST');
+    const r = await call('/dsh-pet-7340/state');
+    const body = JSON.parse(r.body) as {
+      sections: Record<string, { counter: number; data: Record<string, unknown> | null }>;
+    };
+    const relays = body.sections.relays;
+    assert.ok(relays.counter > 0, '写过之后 counter 必须 > 0（前端靠它判断重渲染）');
+    const data = relays.data as { summary: { total: string; siteCount: number }; sites: unknown[]; refreshedAt: string };
+    assert.equal(data.summary.total, '7.00');
+    assert.equal(data.summary.siteCount, 1);
+    assert.equal(data.sites.length, 1);
+    assert.equal(typeof data.refreshedAt, 'string');
+    // 原有单服务商链路没被挤掉
+    assert.ok(body.sections.balance.counter > 0);
   });
 });

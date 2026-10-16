@@ -26,6 +26,19 @@ export const SITES_FILE = 'relays.json';
 /** 凭证文件（只放密钥；不随站点文件导出） */
 export const CREDENTIALS_FILE = 'relay-credentials.json';
 
+/**
+ * 带 `cause` 的 Error。
+ *
+ * 本项目 tsconfig 的 `lib` 是 ES2020（没有 `ErrorOptions` 类型），而运行时
+ * `engines.node >= 22.12` 原生支持 `cause`。这里用一次转型把两者接上：既不为了
+ * 一个类型去抬高整个项目的 lib，也不丢掉排错时要用的错误链。
+ */
+function errorWithCause(message: string, cause: unknown): Error {
+  const err = new Error(message);
+  (err as Error & { cause?: unknown }).cause = cause;
+  return err;
+}
+
 /** 新建 / 更新站点的输入。凭证单独传，不进站点实体 */
 export interface SiteInput {
   id?: string;
@@ -66,9 +79,9 @@ function readJsonSafe<T>(path: string, fallback: T, what: string): T {
     } catch {
       // 改名也失败（权限/占用）就保留原样，至少不覆盖
     }
-    throw new Error(
+    throw errorWithCause(
       'relays: ' + what + ' 损坏，已留存为 ' + path + '.corrupt-' + stamp + '（' + (e instanceof Error ? e.message : String(e)) + '）',
-      { cause: e },
+      e,
     );
   }
 }
