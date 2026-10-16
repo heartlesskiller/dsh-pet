@@ -38,30 +38,46 @@
 
 ## 2. V1 范围（按优先级排序）
 
-### R1 · 中转站契约层与 new-api 适配器（本轮）
+> **R0 是目标①的唯一承载，必须最先做**（原计划漏了它，详见 §6 修订记录）。
+> R3 的余额**只能进 `sections.relays` 新叶子，绝不能进 `sections.balance`**——那会破坏既有客户端契约。
+
+### R0 · 宿主无关网关（目标①，架构见 `docs/07-architecture-host-agnostic.md`）
+- **S0 单实例锁**（🔴 阻塞项，当前是真 bug：端口被占就顺延到 3081 → 第二只桌宠静默启动 + 发现文件互相覆盖）
+- 发现机制：3080 端口 + `agent-gateway.json` 发现文件 + 端口扫描兜底
+- 握手与仲裁：`POST /agents/hello` 60s TTL 心跳；**优先级 + TTL，不搞租约锁**
+- 能力分级：L0 在场 / L1 只读 / L2 驱动 / L3 改配置与凭证（**按「能否造成不可逆损害」切，不按读写切**）
+- 鉴权：分域可选 token，**默认全关**（个人自用零成本），只收紧 L3
+- `capabilities.ts`：把 DSH 专属能力收敛成 `CapabilitySet` 四个可选接口，独立模式从「硬降级」变「可填充」
+- 摄入双轨：**ACP 首选**（pet 作 client spawn 官方适配器，Registry 40+ agent 零适配）+ **HTTP 兜底**；**不自建 JSONL 总线**
+- 推送：轮询契约不动，另加 `GET /state/stream`（SSE）opt-in；**不做 WebSocket**
+
+### R1 · 中转站契约层与 new-api 适配器
 - `src/host/relays/types.ts`：站点 / 凭证 / 余额 / 健康状态的契约
 - `src/host/relays/money.ts`：**quota ↔ 金额的唯一权威换算**（默认 500000 quota = 1 USD），禁止其他模块自算
-- `src/host/relays/providers/newapi.ts`：one-api / new-api 系适配器（`GET /api/user/self`）
+- `src/host/relays/providers/newapi.ts`：one-api / new-api 系适配器
 - 纯函数解析 + 单测（不依赖网络）
 
 ### R2 · 站点注册表与本地持久化
-- `src/host/relays/store.ts`：站点 CRUD、JSON 落盘（独立模式数据目录）
+- `src/host/relays/store.ts`：站点 CRUD、JSON 落盘
 - `src/host/relays/credential-store.ts`：本地凭证存储 + **全链路脱敏**
-- `/relays` 系列 HTTP 端点（CRUD / 刷新 / 健康检查 / 切换）
+- `/relays` 系列 HTTP 端点
 
-### R3 · 接入余额动画与健康状态
-- 把 N 个站点的余额聚合成 `/state` 的 `sections.balance`（沿用 `money` 形态 → 六档动画自动生效）
-- 新增 `sections.relays` 状态叶：各站健康、模型数、最近一次抓取时间
-- 站点切换：切换后广播 / 右键菜单可选
+### R3 · 接入展示层与状态叶
+- **`sections.relays` 新状态叶**（`{counter,data}` 与上游一致）；**不动 `sections.balance`**
+- 聚合结果喂桌宠：六档余额动画 / 气泡 / 低余额告警
+- `refreshBalance` 扩展为双链路并存（有启用站点走 relays，否则走原单服务商）
+- 周期刷新接上游 `eventsRefreshSec.balance`
 
-### R4 · 其余适配器
+### R4 · 其余适配器与自动识别
 - `sub2api.ts`（`GET <base>/usage` + sk key）
 - `openai-compat.ts`（`GET <base>/dashboard/billing/subscription` 兜底）
-- 模型清单抓取（`GET /v1/models`）
+- **站点类型自动识别**（`POST /relays/detect`，信号优先级与算法见 `06-research-optimization.md` 附录 C 第 8 节；**一次 `/api/status` 请求同时供存活探测与类型识别，不拆两次、不靠 URL 猜**）
+- 模型清单抓取**优先试定价接口**，失败回落 `/v1/models`（附录 C 第 9 节）
+- **`rateUnconfirmed` 语义**：换算率探测不到就标记未确认并要求用户确认，**绝不静默用默认值**（修订 #11）
 
 ### R5 · 文档与打包
-- `README.md` 补「中转站管理」章节 + 上游致谢
-- `openapi.yaml` 补 `/relays` 契约
+- `README.md` 补「中转站管理」+ 上游致谢
+- `openapi.yaml` 补 `/relays` 子域与 `/agents` 契约
 - 独立模式一键启动脚本
 
 ---
@@ -93,7 +109,27 @@
 
 ---
 
-## 5. 进度记录
+## 6. 修订记录（架构师与产品经理的反馈，已纳入）
+
+| # | 来源 | 问题 | 处置 |
+|---|---|---|---|
+| 1 | 架构师 | 🔴 **原计划 R1–R5 没有一步实现目标①（宿主无关）** | 新增 **R0** 并置顶；细节全部交给 `07-architecture-host-agnostic.md` |
+| 2 | 架构师 | 🔴 原 R3 写「聚合成 `sections.balance`」会**破坏既有客户端契约**（`shared/balance.ts:106` 的形状被 `BalanceUnavailable` 注释锁死，`shared/state.ts:8` 的路径只当不透明键用） | 改为**只进 `sections.relays` 新叶子**，`sections.balance` 留给上游单服务商 |
+| 3 | 架构师 | 🔴 **当前没有单实例锁**：`server.ts:139-166` 端口被占就顺延 3081 → 第二实例静默启动 → 两只桌宠 + `agent-gateway.json` 互相覆盖 | 提为 **S0 阻塞项**，用互斥体/锁文件（不是端口），已占用则明确失败 |
+| 4 | 产品经理 | 🔴 「自建 AgentLink 协议」是在重复造 **ACP**（4.4k Star / Apache-2.0 / 5 语言 SDK / Registry 40+ agent） | 架构师裁决：**ACP 首选 + HTTP 兜底双轨，不自建 JSONL 总线** |
+| 5 | 产品经理 | 源码确证 `/dashboard/billing/*` 只要 **API Key**（`TokenAuth()`），不需要 AccessToken | 凭证引导改为「API Key 优先」；取数链路改三级 |
+| 6 | 产品经理 | 7 个会算错钱的接口坑（`hard_limit_usd` 非剩余、`total_usage` 单位是分、1e8 无限额度哨兵、令牌级 vs 账户级、200-with-error、hard_limit 累加、货币开关） | 已转工程师实施规格：三级链路 + 四个纯函数守卫 + `scope`/`unlimited` 标记 |
+| 7 | 架构师 | `POST /relays/{id}/refresh` 直接返回数据，违反 API.md 约定二（动作端点只回 `{ok}`） | **裁决：保留**。`/relays` 是机器接口子域，agent 一次调用就要拿到结果；但必须**记为明确的子域契约决策**并同步改 API.md/openapi.yaml，且**不许扩散到 `/balance`、`/whisper` 等既有端点** |
+| 8 | 架构师 | `handleRelayRoute` 内联 ~170 行在 `index.ts`，超过 50 行函数红线 | **裁决：V1 接受**（代码已在飞、重写风险更高），V1.5 抽 `RouteModule` 时一并解决 |
+| 9 | 架构师 | 缺 `/relays/detect`、`/relays/models`、`/relays/focus` 三个端点 | **全部补**。`detect`=PRD P0-3 站点类型识别；`models`=用户最初痛点「可用模型」；`focus`=用户明确要求的「站点切换」 |
+| 10 | 架构师 | `PetState`（5 态）与上游 6 档工作状态**是不同的两套东西**，别混 | 记录在案：我们的 5 态驱动桌宠表情，上游 6 档驱动工作状态动画，两者并存不互换 |
+| 11 | 产品经理 | 🔴 **done-hub 的 `QuotaPerUnit` 默认值在官方文档里自相矛盾**：一处 `500`、一处 `500000`，**相差 1000 倍**；`DisplayIncurrencyEnabled` 默认值也两处冲突 | **「按站覆盖换算率」从可选升为必填**；且 `money.ts` 的 `siteQuotaPerUnit(undefined)→500000` 兜底**必须改成「未确认」语义**：能自动探测到才用，探测不到就标 `rateUnconfirmed` 并要求用户确认，**绝不静默用 500000** |
+| 12 | 产品经理 | **VoAPI 查余额需要 JWT Token**（既不是 AccessToken 也不是 API Key） | `RelayCredentialKind` 预留 `jwt`；且 VoAPI 必须在**识别阶段就分流**，不能等查询失败再提示 |
+| 13 | 产品经理 | `xc996/API_detect_tools` 的 **Bot Detection 能在 HTTP 200 下识别挑战页** | 解析守卫增加「**按内容特征判错**」一类（附录 B 坑 6 的升级版），命中走浏览器桥降级 |
+| 14 | 产品经理 | **定价接口返回的模型清单（1000+）比 `/v1/models`（只返回当前 Key 有权限的）更全** | 模型清单抓取**优先试定价接口**，失败再回落 `/v1/models` |
+| 15 | 产品经理 | `/api/status` 一个探针可两用（存活探测 + 类型识别），且**不要靠 URL 猜类型**（Veloera 界面与 new-api 高度相似） | `detect` 与 `health` **合并为一次 `/api/status` 请求**，不拆两次 |
+
+## 7. 进度记录
 
 | 轮次 | 内容 | commit |
 |---|---|---|
