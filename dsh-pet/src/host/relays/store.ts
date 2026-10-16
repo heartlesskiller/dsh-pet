@@ -68,6 +68,7 @@ function readJsonSafe<T>(path: string, fallback: T, what: string): T {
     }
     throw new Error(
       'relays: ' + what + ' 损坏，已留存为 ' + path + '.corrupt-' + stamp + '（' + (e instanceof Error ? e.message : String(e)) + '）',
+      { cause: e },
     );
   }
 }

@@ -86,6 +86,8 @@ export interface RelaySiteView extends RelaySite {
     masked: string;
     /** 凭证是否已配置（manual 也算已配置） */
     present: boolean;
+    /** 脱敏后的附加请求头（键保留、值全掩）。没有附加头时该键不存在 */
+    extraHeaders?: Record<string, string>;
     /** 最近一次凭证验证时间 */
     lastValidatedAt?: string;
   };
