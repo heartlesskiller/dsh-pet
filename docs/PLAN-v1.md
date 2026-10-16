@@ -48,11 +48,15 @@
 - 能力分级：L0 在场 / L1 只读 / L2 驱动 / L3 改配置与凭证（**按「能否造成不可逆损害」切，不按读写切**）
 - 鉴权：分域可选 token，**默认全关**（个人自用零成本），只收紧 L3
 - `capabilities.ts`：把 DSH 专属能力收敛成 `CapabilitySet` 四个可选接口，独立模式从「硬降级」变「可填充」
-- 摄入**三轨**（架构师 v2.1 裁决，见修订 #16）：
-  - **HTTP `POST /events`**（V1 主轨，任意 agent 一个 curl 就能推状态）
-  - **per-agent hooks**（V1 优先做 Claude Code + Codex；零新依赖、零常驻成本、不需要 SDK 和子进程）
+- 摄入**四轨**（架构师裁决「部分借用」+ 产品经理 `06b-acp-integration.md` 成本分析合并，见修订 #16/#18）：
+  - **HTTP `POST /events`**（P0 主轨，任意 agent 一条 curl 就能推状态，0.5 天）
+  - **per-agent hooks**（P0，用 agent 原生 hook，覆盖「终端里已跑着的 agent」，1–2 天；优先 Claude Code + Codex）
+  - **ACP**（P1，桌宠作 **Client** 端而非 agent；官方最小示例只需实现 `requestPermission` + `sessionUpdate` 两个方法，约 100–150 行）
   - **JSONL tail**（P2 兜底，按 `06-research-optimization.md` C3 规格）
-  - **不实现 ACP 线上协议**：只借其语义（`notice` + `severity: info|warning|error` + coalesce 重复 notice）与 Registry（当调研输入），桌宠**既不做 ACP client 也不做 ACP agent**
+  - 四轨**共用一层六态归一化**，可独立排期互不阻塞
+  - **桌宠不把自己注册进 ACP Registry**（Registry 收录 agent，桌宠是 Client，范畴错误）；读 Registry 是可选 P2
+  - **不实现反构**（桌宠做 ACP agent）：语义不成立（ACP agent 被期望响应 `prompt` 并推理，桌宠不能推理），且未找到任何先例
+  - **⚠️ ACP 日志必须写 stderr 绝不写 stdout**，否则污染协议流
 - 推送：轮询契约不动，另加 `GET /state/stream`（SSE）opt-in；**不做 WebSocket**
 
 ### R1 · 中转站契约层与 new-api 适配器
@@ -134,6 +138,12 @@
 | 15 | 产品经理 | `/api/status` 一个探针可两用（存活探测 + 类型识别），且**不要靠 URL 猜类型**（Veloera 界面与 new-api 高度相似） | `detect` 与 `health` **合并为一次 `/api/status` 请求**，不拆两次 |
 | 16 | 架构师 | 🔴 **「ACP 优先」的收益前提不成立**：那 40+ agent 只对「自己 spawn agent 的 ACP client」可用；桌宠是**第三方观察者**，无权 attach 到不属于自己的会话上，所以「零适配覆盖 40+ agent」是伪命题。且 ACP 走 stdio subprocess，多 agent = 多常驻子进程，直接违背常驻资源硬指标 | **裁决：部分借用，不实现 ACP 线上协议**。只借语义（`notice` + `severity` + coalesce）与 Registry（当调研输入）。摄入改**三轨**：HTTP `POST /events`（主）+ per-agent hooks（Claude Code / Codex 优先）+ JSONL tail（P2）。桌宠既不做 ACP client 也不做 ACP agent |
 | 17 | 架构师 | 原设计缺「**ACP 是哪一端**」这个前提 | 已在 v2.1 明确：桌宠**哪一端都不是**，只做自己的 HTTP 协议 + hooks 摄入 |
+| 18 | 产品经理 | **三版本不靠探测区分，靠显式 `provider_type` 配置**；`/api/user/self` 响应形状在 new-api 新版与 one-api 之间**完全相同**，差异在端点存在性而非字段结构 | `parseUserSelf` **不需要版本分支**；类型识别不能依赖响应形状，要靠 `/api/status` |
+| 19 | 产品经理 | **`/api/status` 一个端点三用**：存活探测 + 类型识别 + **读 `data.quota_per_unit` 自动推断换算率**（官方文档明标「鉴权要求:公开」，默认 `500 * 1000.0`） | 换算率**先自动探测**；探测不到才 `rateUnconfirmed`。我此前「探测不到就绝不静默默认」的指令要加前提：**探测是本该走通的第一路径** |
+| 20 | 产品经理 | **AT 预检成功后的业务错误 / Turnstile / 结果不确定，绝不回退 Cookie**（`leolulu/newapi-daily-checkin` 的决策链原话：避免重复签到或把验证码误判为认证失败） | 必须写进 `querySiteBalance` 降级链：**凭证类型不自动降级**，只做「端点内三级降级」 |
+| 21 | 产品经理 | `New-Api-User` 头**已不参与鉴权**（new-api 官方博客明示），值就是用户数字 ID；`Authorization: Bearer` 与裸值**两者都收** | `authHeaders` 保持 Bearer 默认 + `extraHeaders` 逃生口即可；用户引导里删掉「必须带 New-Api-User」的误导 |
+| 22 | 产品经理 | ThendCN 选 Cookie 是**同源 BFF 架构使然，不是站点限制**；AccessToken 才是我们该推的凭证 | 凭证引导顺序定为 **AccessToken → API Key → Cookie(高级逃生) → 手工填写**；Cookie 只在提示里作为高级可选项出现 |
+| 23 | 产品经理 | Cloudflare 拦截面判定表（`cf-mitigated` 头 / `server: cloudflare`+403 / `challenge-platform` 标记页 / `x-datadome`） | `classifyResponse` 按此表实现；**分类取决于站点 CF 配置，必须留配置项**；仍待真实站点验证 |
 
 ## 8. 工程纪律（踩过的坑，违反即返工）
 
