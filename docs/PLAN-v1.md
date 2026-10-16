@@ -98,3 +98,17 @@
 | 轮次 | 内容 | commit |
 |---|---|---|
 | 0 | 克隆上游、通读 README/API.md/openapi.yaml/src、缺口分析 | — |
+| 1 | **R1 中转站契约层**：`types.ts`（站点/凭证/余额/健康契约，复用上游 `MoneyBalance` 使客户端零改动）、`money.ts`（quota↔金额唯一权威，默认 500000=1USD 可按站覆盖）、`providers/newapi.ts`（one-api/new-api 适配器：`/api/user/self` + `/v1/models` + `/api/status` 探测，纯函数可测） | `e604146` |
+| 2 | **R2a 持久化与脱敏**：`store.ts`（站点/凭证分文件、原子写、损坏文件改名 `.corrupt-*` 留存后抛错、可选字段条件展开）、`redact.ts`（`maskSecret`/`maskHeaders`/`containsSecret` 唯一脱敏出口） | `304d87c` |
+| 3 | **R2b 查询编排**：`index.ts`（注册表、`querySiteBalance` 完整降级链、`checkSiteHealth` 401/403→auth-failed、`queryAllBalances` 信号量并发 4、`selectLowSites` 阈值不猜/手工值不告警、`aggregateBalances` 多币种不混算） | `8f58db0` |
+| 4 | **质量清零**：`RelaySiteView.extraHeaders` 类型补齐、错误链 `cause`、typecheck/lint/build 全过；装齐依赖后**全量 `pnpm test` 718 个 717 过 0 失败**（此前 4 个失败经上游基线 worktree 对照确认是缺依赖，非回归） | `e73286b` |
+
+**累计新增 55 个单测，全部通过。**
+
+### 尚未闭环（如实记账）
+
+1. **new-api 适配器未对真实站点跑通过**。端点与认证依据的是上游 `dsh-stats-panel/docs/CHANNELS.md`、one-api `docs/API.md`、new-api `new-api-key-tool` 的二手证据，`providers/newapi.ts` 文件末列了 4 条待实测项（`Bearer` 对 one-api 老版本是否兼容、`/api/status` 是否免鉴权、`data.quota` 语义、Cloudflare 归类）。**需要用户提供 ≥1 个真实站点才能闭环。**
+2. **`/relays` HTTP 端点未接**。路由分发在 `src/host/index.ts` 的单一 prefix handler（`ROUTE_PREFIX` + `url.pathname.slice`），尚未插入 relays 分支。
+3. **`sections.relays` 状态叶未接**，`refreshBalance` 仍只走上游单服务商链路。
+4. **sub2api / openai-compat 适配器未写**（契约已声明，注册表返回 `unsupported`）。
+5. **凭证明文落盘**：独立模式无 keychain，`relay-credentials.json` 目前是明文（计划 Q1，V2 用 keytar/DPAPI）。
