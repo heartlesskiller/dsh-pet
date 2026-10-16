@@ -48,7 +48,11 @@
 - 能力分级：L0 在场 / L1 只读 / L2 驱动 / L3 改配置与凭证（**按「能否造成不可逆损害」切，不按读写切**）
 - 鉴权：分域可选 token，**默认全关**（个人自用零成本），只收紧 L3
 - `capabilities.ts`：把 DSH 专属能力收敛成 `CapabilitySet` 四个可选接口，独立模式从「硬降级」变「可填充」
-- 摄入双轨：**ACP 首选**（pet 作 client spawn 官方适配器，Registry 40+ agent 零适配）+ **HTTP 兜底**；**不自建 JSONL 总线**
+- 摄入**三轨**（架构师 v2.1 裁决，见修订 #16）：
+  - **HTTP `POST /events`**（V1 主轨，任意 agent 一个 curl 就能推状态）
+  - **per-agent hooks**（V1 优先做 Claude Code + Codex；零新依赖、零常驻成本、不需要 SDK 和子进程）
+  - **JSONL tail**（P2 兜底，按 `06-research-optimization.md` C3 规格）
+  - **不实现 ACP 线上协议**：只借其语义（`notice` + `severity: info|warning|error` + coalesce 重复 notice）与 Registry（当调研输入），桌宠**既不做 ACP client 也不做 ACP agent**
 - 推送：轮询契约不动，另加 `GET /state/stream`（SSE）opt-in；**不做 WebSocket**
 
 ### R1 · 中转站契约层与 new-api 适配器
@@ -128,8 +132,19 @@
 | 13 | 产品经理 | `xc996/API_detect_tools` 的 **Bot Detection 能在 HTTP 200 下识别挑战页** | 解析守卫增加「**按内容特征判错**」一类（附录 B 坑 6 的升级版），命中走浏览器桥降级 |
 | 14 | 产品经理 | **定价接口返回的模型清单（1000+）比 `/v1/models`（只返回当前 Key 有权限的）更全** | 模型清单抓取**优先试定价接口**，失败再回落 `/v1/models` |
 | 15 | 产品经理 | `/api/status` 一个探针可两用（存活探测 + 类型识别），且**不要靠 URL 猜类型**（Veloera 界面与 new-api 高度相似） | `detect` 与 `health` **合并为一次 `/api/status` 请求**，不拆两次 |
+| 16 | 架构师 | 🔴 **「ACP 优先」的收益前提不成立**：那 40+ agent 只对「自己 spawn agent 的 ACP client」可用；桌宠是**第三方观察者**，无权 attach 到不属于自己的会话上，所以「零适配覆盖 40+ agent」是伪命题。且 ACP 走 stdio subprocess，多 agent = 多常驻子进程，直接违背常驻资源硬指标 | **裁决：部分借用，不实现 ACP 线上协议**。只借语义（`notice` + `severity` + coalesce）与 Registry（当调研输入）。摄入改**三轨**：HTTP `POST /events`（主）+ per-agent hooks（Claude Code / Codex 优先）+ JSONL tail（P2）。桌宠既不做 ACP client 也不做 ACP agent |
+| 17 | 架构师 | 原设计缺「**ACP 是哪一端**」这个前提 | 已在 v2.1 明确：桌宠**哪一端都不是**，只做自己的 HTTP 协议 + hooks 摄入 |
 
-## 7. 进度记录
+## 8. 工程纪律（踩过的坑，违反即返工）
+
+| # | 坑 | 教训 |
+|---|---|---|
+| E1 | **改完代码必须复跑 typecheck 再提交**。`e73286b` 的 commit message 声称「typecheck 清零」，但那次修复（补 `{cause:e}`）之后**没有复跑**，实际在 HEAD 上留下一个 ES2020 缺 `ErrorOptions` 的类型错误，由工程师用 `git stash` 在 `52e270b` 上复现才发现 | **「声称完成」之前，必须把上一条命令重跑一遍**。commit message 里的验证声明等于对外承诺，不许凭记忆写 |
+| E2 | **`import … from './relays'`（目录导入）在 Node ESM 下直接 `ERR_UNSUPPORTED_DIR_IMPORT`**，而且**只在跑测试时炸**，`tsc` 和 `vite` 都不报。第一版这么写导致 3 个测试文件连带崩溃、**39 个测试静默没跑** | 目录导入一律写成 `./relays/index`（仓库里 `./balance/index` 正是这个写法）。**测试数突然变少就是红色警报，必须先查为什么** |
+| E3 | 测试文件数/用例数**只增不减**；任何一轮完成后核对 `# tests` 总数，掉了就是有文件没跑起来 | 见 E2 |
+| E4 | 数据目录 `relays` 放在 `userRoot/relays`（与 `pet/`、`main-animation/` 同规矩），**不从 `storage-paths.ts` 拿**——那个模块只做路径推导，`userData` 项本身就是调用方传进去的 `userRoot`，它并不定义 relay 目录 | 已确认的决策，不要反复改 |
+
+## 9. 进度记录
 
 | 轮次 | 内容 | commit |
 |---|---|---|
