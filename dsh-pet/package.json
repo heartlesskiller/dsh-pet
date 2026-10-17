@@ -85,6 +85,7 @@
     "check:openapi": "node scripts/check-openapi.mjs",
     "test": "node --experimental-strip-types --import ./scripts/test-register.mjs --test src/**/*.test.ts",
     "verify:relays": "node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/verify-relays-client.ts",
+    "verify:relays-admin": "node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/verify-relays-admin.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "types": "node scripts/gen-types.mjs",
     "lint": "eslint .",

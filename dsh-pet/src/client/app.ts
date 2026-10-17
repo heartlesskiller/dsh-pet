@@ -3,6 +3,7 @@
 // 类似 Vue 的 App.vue 只挂根组件、SpringBoot 启动类只做装配，不写页面业务。
 import { makePetUI } from './pet';
 import { makePetConfigSection, NS, zh, en, petBridge } from './settings';
+import { makeRelaysAdminSection, NS as RELAYS_NS, zh as relaysZh, en as relaysEn } from './relays-admin';
 import { initNotify } from './notify';
 import { installCommandFaces, type CommandFace, type CommandUiLike } from './command-faces';
 import { installSectionNavIcon } from './nav-icon';
@@ -66,7 +67,10 @@ export function makeFactory(): (require: (mod: string) => any) => any {
     function apply(ctx: any) {
       // 本地化字典（设置页文案）
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-pet: dictionaries');
+      // 中转站管理字典（独立命名空间：与桌宠配置分开注册，互不影响）
+      ctx.effect(() => ctx.locale.register(RELAYS_NS, { zh: relaysZh, en: relaysEn }), 'dsh-pet: relays dictionaries');
       const t = ctx.locale.bind(NS);
+      const tRelays = ctx.locale.bind(RELAYS_NS);
 
       // 系统通知：host 侧监听 DSH 宿主事件生成通知帧，写进 /state 的 sections.notify；
       // 容器的统一轮询发现 counter 变化后调 notifyFromFrame 弹 toast（本引擎不再自己轮询）。
@@ -154,6 +158,23 @@ export function makeFactory(): (require: (mod: string) => any) => any {
         yield ctx.slots.register(
           { name: 'settings.section', id: 'pet-config', order: 30, label: () => t('nav'), inject: () => ({ t }) },
           PetConfigSection,
+        );
+      });
+
+      // 设置页：「中转站管理」（站点 CRUD / detect / 焦点 / 手工余额 / 换算率核对）。
+      // 与 pet-config 同一套工厂注入（h/useState/useEffect/useRef/useCallback/t）；order 31
+      // 紧跟其后（错开 30，不抢桌宠配置的位置）。字典走独立命名空间 relays.admin。
+      const RelaysAdminSection = makeRelaysAdminSection({ h, useState, useEffect, useRef, useCallback, t: tRelays });
+      ctx.slots.inject('settings.section', function* () {
+        yield ctx.slots.register(
+          {
+            name: 'settings.section',
+            id: 'relays-admin',
+            order: 31,
+            label: () => tRelays('nav'),
+            inject: () => ({ t: tRelays }),
+          },
+          RelaysAdminSection,
         );
       });
     }
