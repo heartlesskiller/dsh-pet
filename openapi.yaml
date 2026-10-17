@@ -80,6 +80,12 @@ tags:
     description: 配置的读取、保存与元信息
   - name: Assets
     description: 字体、通知图标、表情包、动画素材
+  - name: Gateway
+    description: |
+      宿主无关网关（`/capabilities` · `/agents` · `/events` · `/state/stream`）——让**任意 agent**
+      不依赖 DSH 也能接入桌宠：自述能力、登记在场、推送气泡/六档状态、订阅状态流。
+      档位：L0 在场（capabilities/hello）· L1 只读（agents/state/stream）· L2 驱动（events）。
+      设计依据见 `docs/07-architecture-host-agnostic.md`（v2.2）。
   - name: Relays
     description: |
       中转站管理（`/relays` 子域）——管理多个 LLM API 中转站的资产：余额 / 健康 / 模型清单 / 焦点站。
@@ -934,6 +940,209 @@ paths:
             text/plain:
               schema:
                 type: string
+
+  # ---------- 宿主无关网关（T07） ----------
+
+  "/dsh-pet-7340/capabilities":
+    get:
+      tags: [Gateway]
+      operationId: getCapabilities
+      summary: 桌宠能力自述（L0 在场）
+      description: |
+        自报「我是谁、我能干什么、哪些端点在哪一档」。任何 agent 不用试错就能判断碎碎念能不能用、
+        凭证在不在、会话事件从哪来（`hostCapabilities` 的三个枚举值就是回答这件事）。
+
+        - `mode`：`standalone`（独立模式）/ `dsh`（DSH 插件模式）；
+        - `hostCapabilities.credentials`：`none` / `dsh`（DSH 凭证库）/ `local-file`（relays 目录的 0600 文件）；
+        - `hostCapabilities.sessionEvents`：`none` / `dsh`（DSH 会话事件在场，此时 `POST /events` 的 status 段被忽略）/ `http`；
+        - `instanceId` 与发现文件（`<DSH_HOME>/dsh-pet/gateways/<pid>.json`）里的同名，供复核；
+        - **不返回任何凭证或配置值**，只报能力在场与否。
+      responses:
+        "200":
+          description: 能力与档位表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitiesPayload"
+
+  "/dsh-pet-7340/agents":
+    get:
+      tags: [Gateway]
+      operationId: listAgents
+      summary: 在场 agent 列表（L1 只读）
+      description: |
+        当前在 TTL 内（60s）的 agent。过期条目自动滤除（读时清理，不另起定时器）；
+        进程重启即空——在场信息本就是易失的，下一个心跳周期自然恢复。
+      responses:
+        "200":
+          description: 在场列表（按 agentId 排序）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  agents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentView"
+
+  "/dsh-pet-7340/agents/hello":
+    post:
+      tags: [Gateway]
+      operationId: agentHello
+      summary: 登记在场 / 心跳续期（L0 在场）
+      description: |
+        第一次调用 = 登记；之后每 ≤60s 重复调用同一端点 = 心跳续期（`leaseId` 不变）。
+        **不落盘、不鉴权**：服务端只维护进程内 Map。`instanceId` / `capabilities` 分别是
+        `agentId` / `wants` 的别名（发现文件里的字段名，两种都收）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agentId:
+                  type: string
+                  description: agent 标识（必填；也可用别名 instanceId）
+                instanceId:
+                  type: string
+                  description: agentId 的别名
+                kind:
+                  type: string
+                wants:
+                  type: array
+                  items:
+                    type: string
+                capabilities:
+                  type: array
+                  description: wants 的别名
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: 登记成功（leaseId + ttlSec + granted）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  leaseId:
+                    type: string
+                  ttlSec:
+                    type: integer
+                  granted:
+                    type: array
+                    items:
+                      type: string
+        "400":
+          description: agentId 缺失或过长（限 128 字符）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  "/dsh-pet-7340/events":
+    post:
+      tags: [Gateway]
+      operationId: postEvents
+      summary: 事件摄入（L2 驱动）：气泡 + 六档工作状态
+      description: |
+        一个 curl 就能接入任意 agent（HTTP 摄入主轨）。字段形状**借自 ACP 的 notice/severity/coalesce 语义**，
+        但不实现 ACP 协议。写入复用既有叶子：`notice` → `pets.<id>.say`（与 /broadcast 同一条；
+        客户端 1s 轮询后弹气泡），`status` → `sections.workStatus`（合成会话 `http:<agentId>`）。
+        **不新造状态通道。**
+
+        互斥规则：`/capabilities` 的 `hostCapabilities.sessionEvents === 'dsh'` 时（DSH 会话事件在场），
+        `status` 段被忽略，只处理 `notice`——避免六档被两个源同时改写而抖动。
+
+        coalesce：同 `coalesceKey` 在 5s 窗口内、且优先级未升级 → 静默合并（不重复弹）；
+        `error` 永远能穿透 `warning` 的合并窗口（告警升级不该被吞）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agentId]
+              properties:
+                agentId:
+                  type: string
+                  description: 事件来源 agent（限 128 字符）
+                sessionId:
+                  type: string
+                  description: 可选的会话标识（当前仅记录，不参与路由）
+                notice:
+                  type: object
+                  required: [severity, text]
+                  properties:
+                    severity:
+                      type: string
+                      enum: [info, warning, error]
+                      description: "info→priority 0 / warning→10 / error→20"
+                    text:
+                      type: string
+                      description: "气泡文本（≤500 码点，超长 400，不静默截断）"
+                    coalesceKey:
+                      type: string
+                      description: 去重键（同键 5s 窗口内不重复弹）
+                    ttlMs:
+                      type: integer
+                      description: "气泡存留毫秒（1..60000；R0 仅校验，不驱动过期）"
+                status:
+                  type: string
+                  enum: [idle, thinking, working, waiting-approval, done, error]
+                  description: "六档驱动；idle = 清会话回空闲"
+                petId:
+                  type: string
+                  description: 气泡目标宠物（缺省 = 当前桌宠）
+      responses:
+        "200":
+          description: |
+            动作结果（HTTP 恒 200，失败走 `ok:false`）：`no-active-pet` 没有可显示的桌宠；
+            `ingest-error` 写状态失败（message 带原因）。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/OkResponse"
+                  - $ref: "#/components/schemas/FailureResponse"
+        "400":
+          description: 结构错（缺 agentId / 坏 severity / 空文本 / 超长 / 未知 status）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  "/dsh-pet-7340/state/stream":
+    get:
+      tags: [Gateway]
+      operationId: streamState
+      summary: 状态流（SSE，opt-in，L1 只读）
+      description: |
+        `GET /state` 的推送版：`text/event-stream`，帧格式 `id: <maxCounter>` + `event: state|snapshot`
+        + `data: <完整 /state JSON>`。50ms 去抖（一次请求连写多片只发一帧）、连接上限 8（超出 429）、
+        25s 心跳注释行、`Last-Event-ID` 只用于去重（**不重放历史**）。
+
+        **轮询契约不动**：`GET /state` 仍是唯一事实源，SSE 只是加速通道，断了不影响正确性。
+        只能走 HTTP 直连——桌面 bridge 管道不支持流式，经 bridge 访问会得到 501。
+      responses:
+        "200":
+          description: SSE 流（首帧即当前快照）
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "429":
+          description: 连接数已达上限（8）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   # ---------- 中转站管理（/relays 子域） ----------
 
@@ -2319,3 +2528,71 @@ components:
                   type: string
                   format: date-time
             - type: "null"
+
+    # ---------- 宿主无关网关（T07） ----------
+
+    CapabilitiesPayload:
+      type: object
+      required: [ok, schema, instanceId, mode, hostCapabilities, tiers, relayKinds]
+      properties:
+        ok:
+          type: boolean
+        schema:
+          type: integer
+          const: 1
+        instanceId:
+          type: string
+          description: 与发现文件（gateways/<pid>.json）里的同源，供复核
+        mode:
+          type: string
+          enum: [standalone, dsh]
+        hostCapabilities:
+          type: object
+          required: [llm, credentials, account, sessionEvents]
+          properties:
+            llm:
+              type: boolean
+            credentials:
+              type: string
+              enum: [none, dsh, local-file]
+              description: "dsh = DSH 凭证库；local-file = relays 目录的 0600 文件（独立模式）"
+            account:
+              type: boolean
+            sessionEvents:
+              type: string
+              enum: [none, dsh, http]
+              description: "dsh = DSH 会话事件在场（POST /events 的 status 段被忽略）；http = 摄入轨"
+        tiers:
+          type: object
+          description: 端点档位表（路径相对 /dsh-pet-7340）
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        relayKinds:
+          type: array
+          items:
+            type: string
+        agentCount:
+          type: integer
+        tokenRequired:
+          type: boolean
+        sseMaxConnections:
+          type: integer
+        httpIngest:
+          type: boolean
+
+    AgentView:
+      type: object
+      required: [agentId, kind, lastSeenAt, expiresAt]
+      properties:
+        agentId:
+          type: string
+        kind:
+          type: string
+        lastSeenAt:
+          type: integer
+          description: epoch ms
+        expiresAt:
+          type: integer
+          description: epoch ms（TTL 60s）

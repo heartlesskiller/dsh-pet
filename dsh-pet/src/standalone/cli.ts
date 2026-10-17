@@ -38,6 +38,8 @@ import {
 import { acquireInstanceLock, InstanceLockBusyError, type InstanceLock } from './instance-lock';
 import { configPathsFor, describePets, isDesktopVisible, parseArgs, USAGE } from './options';
 import { listenStandaloneServer } from './server';
+import { removeGatewayRecord, writeGatewayRecord } from './discovery';
+import { gatewayInstanceId } from '../host/gateway/identity';
 
 /** 实例锁文件位置：与宠物数据同根（`<dshHome>/dsh-pet/standalone.lock`） */
 const lockPathFor = (home: string): string => join(home, 'dsh-pet', 'standalone.lock');
@@ -90,14 +92,32 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
   });
   portRef.value = server.port;
 
+  // 发现记录（T07/S7）：监听成功后立即写 `gateways/<pid>.json`——外部 agent / 其他实例据此
+  // 「看见」本实例；端口变化（未来支持换端口）时同一路径重写。停机时**先校验 pid 才删**。
+  const discoveryFile = writeGatewayRecord({
+    schema: 1,
+    instanceId: gatewayInstanceId(),
+    mode: 'standalone',
+    url: `http://127.0.0.1:${server.port}`,
+    routePrefix: '/dsh-pet-7340',
+    port: server.port,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    capabilities: ['presence', 'relays:read', 'relays:write', 'pet:drive', 'state:stream'],
+    tokenRequired: false,
+  });
+  logger.debug(`发现记录已写入：${discoveryFile}`);
+
   let shuttingDown = false;
   const shutdown = async (reason: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info(`收尾（${reason}）…`);
-    // 先释放插件注册的 effect（停桌面 Helper、清周期定时器），再关服务，最后放实例锁
+    // 先释放插件注册的 effect（停桌面 Helper、清周期定时器），再关服务，最后放实例锁。
+    // 发现记录在释放 effect 之后删（与 07 §5 的顺序一致），删前校验 pid 防止误删别人的文件。
     await context.dispose();
     await server.close();
+    removeGatewayRecord(process.pid);
     lock.release();
     logger.info('已退出。');
   };

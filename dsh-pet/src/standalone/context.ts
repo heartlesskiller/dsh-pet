@@ -106,6 +106,12 @@ export function createStandaloneContext(options: StandaloneContextOptions): Stan
 
   const context: Record<string, unknown> = {
     /**
+     * 宿主形态标记（T07/S5）：`hostModeOf()` 据此区分 DSH 与独立模式。
+     * **必须是显式标记**——伪 ctx 上的 llm/credentials 替身是「明确降级」的假实现，
+     * 若被能力探测当成真能力，`GET /capabilities` 会对 agent 撒谎（报 llm:true 而生成必败）。
+     */
+    hostMode: 'standalone',
+    /**
      * 与 Cordis 同语义：跑一次注册函数并收集它返回的释放函数。
      * 单项失败按 DSH 的 effect 隔离口径处理：记录 + 打日志，不让整个插件起不来
      * （源码形态下包内 assets 不可达时，正是这里会抛）。

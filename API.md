@@ -84,6 +84,30 @@ dsh-pet 的宿主半侧向 DSH 自己的 Web 服务注册了**一条前缀路由
 - **错误口径**：结构性参数错误（坏 JSON / 缺字段 / 站点不存在）→ 4xx + `{ error }`；
   业务失败 → HTTP 200 + `{ ok: false, reason }`（与 `/whisper` 同形）。
 
+## 六、宿主无关网关（让任意 agent 接入）
+
+让**不跑 DSH 的 agent**（Claude Code / Codex / 自己的脚本）也能用上桌宠：自述能力、登记在场、
+推送气泡与六档工作状态、订阅状态流。设计依据见
+[`docs/07-architecture-host-agnostic.md`](docs/07-architecture-host-agnostic.md)。
+
+| 接口 | 档位 | 功能 |
+| --- | --- | --- |
+| `GET /capabilities` | L0 在场 | 能力自述：`mode`（standalone/dsh）、四个能力槽（llm/credentials/account/sessionEvents）、L0–L3 档位表、`relayKinds`、`instanceId` |
+| `POST /agents/hello` | L0 在场 | 登记/心跳（TTL 60s，重复调用即续期；`leaseId` 不变） |
+| `GET /agents` | L1 只读 | 在场 agent 列表（过期自动滤除） |
+| `POST /events` | L2 驱动 | 事件摄入：`notice`（气泡，severity + coalesceKey 去重）与 `status`（六档） |
+| `GET /state/stream` | L1 只读 | SSE 推送版状态（50ms 去抖、上限 8 连接、`Last-Event-ID` 去重） |
+
+**三条使用须知**：
+
+- **一个 curl 就能接入**：`curl -X POST .../events -d '{"agentId":"me","notice":{"severity":"info","text":"跑完了"}}'`
+  —— 事件写进**既有叶子**（气泡 = `pets.<id>.say`、六档 = `sections.workStatus`），前端零改动。
+- **互斥规则**：`/capabilities` 的 `sessionEvents === "dsh"` 时（DSH 会话事件在场），`/events` 的
+  `status` 段会被忽略，只处理 `notice`——避免六档被两个源同时改写而抖动。
+- **发现机制**：独立模式启动后会在 `<DSH_HOME>/dsh-pet/gateways/<pid>.json` 留一份发现记录
+  （实例 id / 端口 / 能力），外部工具据此「看见」桌宠；进程被杀后记录自动判 stale。
+  注意 **S0 之后端口不再顺延**：第二个实例会明确失败，不会偷偷起在 3081。
+
 ## 三条要记住的约定
 
 1. **数据只有一个出口**：`GET /state`。它返回宿主内存里的已发布状态，每个状态位是

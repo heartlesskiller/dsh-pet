@@ -123,7 +123,7 @@ import {
 import { profileNameFrom, storageEntries } from './storage-paths';
 import { PollStateStore } from './state';
 import { timeContextOf } from './time-context';
-import { aggregateBalances, checkSiteHealth, classifyBalanceError, queryAllBalances, querySiteBalance } from './relays/index';
+import { aggregateBalances, checkSiteHealth, classifyBalanceError, queryAllBalances, querySiteBalance, supportedKinds } from './relays/index';
 import { detectRelayKind } from './relays/detect';
 import {
   assertNoSecret,
@@ -158,6 +158,14 @@ import {
 import { DEFAULT_QUOTA_PER_UNIT } from './relays/money';
 import { fetchSiteModels, probeModels, probeStatus } from './relays/providers/newapi';
 import type { RelayCredential, RelayFetchContext, RelaySite } from './relays/types';
+import type { RouteResult } from './route-result';
+import { capabilitiesFrom, hostModeOf } from './capabilities';
+import { AgentRegistry } from './gateway/agents';
+import { createGateway, gatewayRouteOf } from './gateway/index';
+import { createNoticeCoalescer } from './gateway/ingest';
+import { createSseStream } from './gateway/stream';
+import { gatewayInstanceId } from './gateway/identity';
+import { GatewayAuth } from './gateway/auth';
 import {
   HelperProcess,
   defaultElectronExe,
@@ -183,6 +191,9 @@ const PACKAGE_MEMES_DIR = join(PACKAGE_ROOT_ASSETS, 'memes');
 
 /** 路由前缀 */
 const ROUTE_PREFIX = '/dsh-pet-7340';
+
+/** SSE 连接上限（GET /state/stream；个人自用防误开一堆标签页把宿主拖住） */
+const SSE_MAX_CONNECTIONS = 8;
 
 /**
  * 宿主是不是 **DSH 桌面应用**（Electron 宿主）。
@@ -281,11 +292,7 @@ function sendText(res: ServerResponse, status: number, body: string): void {
   res.end(body);
 }
 
-/** 单次业务路由的应答（WebServer 注册与桌面 Helper 管道共用的同一契约；消费方各自落盘） */
-type RouteResult =
-  | { kind: 'json'; status: number; obj: unknown; headers?: Record<string, string> }
-  | { kind: 'text'; status: number; body: string }
-  | { kind: 'file'; file: string; contentType: string };
+/** 单次业务路由的应答：形状已上移到 `./route-result`（网关子模块也要用，避免 ESM 循环导入） */
 
 /** 收集请求体（文本） */
 function readBody(req: IncomingMessage): Promise<string> {
@@ -960,6 +967,68 @@ export function apply(ctx: any): void {
   /** 用户动画根：按扩展名取子目录（main-animation/webm 或 main-animation/mov）。 */
   const userRootFor = (ext: string): string => join(thumbUserRoot, animSubdirFor(ext));
 
+  // ---------- 宿主无关网关（T07）：能力自述 / agent 在场 / 事件摄入 / SSE ----------
+  // 与 relays 同一分层：业务逻辑全在 ./gateway/*（无 GUI、无 HTTP 可测），这里只注入依赖与薄分发。
+  // 依赖注入的口径：状态写入一律走既有叶子（say / workStatus），网关不新造状态通道。
+  const gatewayAuth = new GatewayAuth(); // 默认全关：L3 域 token 门控的启用开关留待后续（07 §5 S7）
+  const agentRegistry = new AgentRegistry();
+  const hostCtx = ctx as unknown as Record<string, unknown>;
+  const hostCaps = capabilitiesFrom(hostCtx);
+  const gateway = createGateway({
+    hostMode: hostModeOf(hostCtx),
+    caps: hostCaps,
+    relayKinds: supportedKinds(),
+    instanceId: gatewayInstanceId(),
+    registry: agentRegistry,
+    tokenRequired: gatewayAuth.anyRequired(),
+    sseMaxConnections: SSE_MAX_CONNECTIONS,
+    httpIngest: true,
+    ingest: {
+      // 气泡：与 /broadcast 同一个叶子（单槽、后到覆盖先到）；severity/priority 供客户端择优渲染
+      pushSay: (petId, p) =>
+        state.writePet(petId, 'say', { text: p.text, severity: p.severity, priority: p.priority }),
+      // 六档工作状态：合成会话 id（http:<agentId>），与 DSH 会话事件共用 WorkStatusStore 的聚合法则
+      setWorkStatus: (agentId, next) => {
+        const sessionId = 'http:' + agentId;
+        if (next === null) {
+          cancelTerminalCleanup(sessionId);
+          workStatus.clear(sessionId);
+          publishWorkStatus();
+          return;
+        }
+        if (!workStatus.setState(sessionId, next, 0)) return;
+        publishWorkStatus();
+        if (next === 'success' || next === 'error') scheduleTerminalCleanup(sessionId);
+        else cancelTerminalCleanup(sessionId);
+      },
+      // 气泡目标：显式 petId（必须真实存在）→ 否则当前焦点宠物 → 没有则 ''
+      resolvePetId: (requested) => {
+        try {
+          const eff = effectivePetList();
+          if (requested && eff.some((p) => String(p.id) === requested)) return requested;
+          return resolveActivePetId();
+        } catch {
+          return '';
+        }
+      },
+      // 互斥规则（07 §4.2）：DSH 会话事件在场时，POST /events 的 status 段被忽略
+      sessionEventsOwned: Boolean(hostCaps.sessionEvents),
+      coalescer: createNoticeCoalescer({}),
+    },
+  });
+  /** SSE 推送（S8）：订阅状态仓写入，50ms 去抖推一帧全量快照 */
+  const sseStream = createSseStream({
+    subscribe: (listener) => state.subscribe(listener),
+    snapshot: () => state.read(),
+    maxConnections: SSE_MAX_CONNECTIONS,
+  });
+  /** 网关子域薄分发（路由映射在 ./gateway/index，这里不写业务） */
+  const handleGatewayRoute = (
+    route: NonNullable<ReturnType<typeof gatewayRouteOf>>,
+    method: string,
+    body?: string,
+  ): Promise<RouteResult> | RouteResult => gateway.handle(route, method, body);
+
   /**
    * 中转站管理路由：`/dsh-pet-7340/relays[/{id}[/action]]`
    *
@@ -1617,6 +1686,11 @@ export function apply(ctx: any): void {
       }
     }
 
+    // 宿主无关网关（T07）：/capabilities · /agents[/hello] · /events（精确匹配、无子路径歧义；
+    // SSE 的 /state/stream 在 HTTP handler 里另拦——它要持有 res，走不了 RouteResult 管道）
+    const gwRoute = gatewayRouteOf(rest);
+    if (gwRoute) return handleGatewayRoute(gwRoute, method, body);
+
     // 中转站管理：/dsh-pet-7340/relays[/{id}[/action]]（CRUD / 刷新 / 健康 / 手工余额）。
     // 必须在下面 `rest.split('/')` 拆 scope **之前**拦下来：relays 之下还有子路径，
     // 落进 thumb/pic/font 那套「scope + 剩余段」的分法会被当成未知 scope 回 400。
@@ -1717,6 +1791,14 @@ export function apply(ctx: any): void {
         path: ROUTE_PREFIX,
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           try {
+            // SSE 是流式响应（自己持有 res 直到客户端断开），必须在 RouteResult 管道之前拦下。
+            // 桌面 bridge 不走这里（它按 scheme 应答），所以 bridge 侧 /state/stream 会命中
+            // gateway 的 501 分支——显式说明「只能走 HTTP 直连」。
+            const pathname = (req.url ?? '').split('?')[0] ?? '';
+            if ((req.method ?? 'GET') === 'GET' && pathname === ROUTE_PREFIX + '/state/stream') {
+              sseStream.handle(req, res);
+              return;
+            }
             const body = req.method === 'PUT' || req.method === 'POST' ? await readBody(req) : undefined;
             const result = await handlePetRoute(req.url ?? '/', req.method ?? 'GET', body);
             if (result.kind === 'json') sendJson(res, result.status, result.obj, result.headers);
@@ -2054,6 +2136,7 @@ export function apply(ctx: any): void {
   // 随插件生命周期清理：桌面 Helper 回收（异步下载完成后不再拉起）
   ctx.effect(() => () => {
     disposed = true;
+    sseStream.closeAll(); // SSE 长连接不主动关会让停机时进程挂着（closeAllConnections 只覆盖 node 侧 socket）
     stopHelper('dsh-host-stop');
   });
 

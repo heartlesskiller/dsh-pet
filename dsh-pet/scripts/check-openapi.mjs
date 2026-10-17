@@ -86,8 +86,13 @@ ok.push(`${Object.keys(doc.paths).length} 条路径 / ${ops} 个操作`);
 // ---- 4. 文档路径 vs 真实实现 ----
 // host 路由是 if (rest === 'x') 链 + scope 分支。rest 可能是两段（config/meta），
 // 所以两边都归一化成「一级段」（config/meta → config）再比对，否则会误报。
+// 网关（/capabilities · /agents · /events）由 gatewayRouteOf 归类、不走 rest === 链，
+// 这里从 gateway/index.ts 的 case 分支补齐（漏了就是文档漏、删了就会红）。
 const host = readFileSync(HOST_SRC, 'utf8');
+const GATEWAY_SRC = join(HERE, '..', 'src', 'host', 'gateway', 'index.ts');
+const gateway = readFileSync(GATEWAY_SRC, 'utf8');
 const implemented = new Set([...host.matchAll(/rest === '([^']+)'/g)].map((m) => m[1].split('/')[0]));
+for (const m of gateway.matchAll(/case '([^']+)':/g)) implemented.add(m[1].split('/')[0]);
 for (const s of ['font', 'pic', 'thumb']) implemented.add(s);
 const documented = new Set();
 for (const p of Object.keys(doc.paths)) {

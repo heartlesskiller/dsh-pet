@@ -53,11 +53,41 @@ export class PollStateStore {
   declare private last: number;
   declare private readonly sections: Record<SectionName, StateLeaf>;
   declare private readonly pets: Map<string, Record<PetLeafName, StateLeaf>>;
+  /**
+   * 写入订阅者（T07/S8：`GET /state/stream` 的 SSE 推送源）。
+   * **纯新增**：既有写入路径只多一次「遍历空集合」，不改变任何 counter / 数据语义。
+   */
+  declare private readonly listeners: Set<() => void>;
 
   constructor() {
     this.last = 0;
     this.sections = { balance: emptyLeaf(), workStatus: emptyLeaf(), notify: emptyLeaf(), relays: emptyLeaf() };
     this.pets = new Map();
+    this.listeners = new Set();
+  }
+
+  /**
+   * 订阅任意叶子写入（返回取消订阅函数）。
+   * 回调**不带参数**：订阅方（SSE 流）在回调里自己 `read()` 一份全量快照即可 ——
+   * 传叶子反而会让订阅方误以为只有那一片变了（一次请求可能连写多片）。
+   * 订阅方抛错**不影响写入**（逐个 try/catch）：状态写入的可用性优先于推送。
+   */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /** 通知订阅者（内部方法；写入路径统一调用） */
+  private notify(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch {
+        // 推送方的问题不许拖垮状态写入
+      }
+    }
   }
 
   /** 下一个 counter：`Date.now()` 与「上一个 +1」取大——单调、不回退、同毫秒不重复 */
@@ -72,6 +102,7 @@ export class PollStateStore {
    */
   writeSection(name: SectionName, data: unknown): void {
     this.sections[name] = { counter: this.next(), data };
+    this.notify();
   }
 
   /** 写一只宠物的叶子（宠物条目不存在则自动建立，两个槽位一起建好，形状恒定） */
@@ -82,6 +113,7 @@ export class PollStateStore {
       this.pets.set(petId, entry);
     }
     entry[leaf] = { counter: this.next(), data };
+    this.notify();
   }
 
   /**
