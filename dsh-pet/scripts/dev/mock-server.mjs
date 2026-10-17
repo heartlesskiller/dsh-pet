@@ -41,9 +41,58 @@ const sendJson = (res, status, body) => {
   res.end(payload);
 };
 
+/** /state 的全局计数器（每次请求 +1；host 侧同口径） */
+let stateCounter = 0;
+
+/** 构造的中转站舰队叶（T04 验收口径：3 站 1 无限 1 低额 1 失败 + 1 外币） */
+const RELAYS_FLEET = {
+  focusSiteId: null,
+  summary: {
+    currency: 'USD',
+    total: '10.00',
+    fullBalance: '20.00',
+    siteCount: 2,
+    unlimitedCount: 1,
+    failedCount: 1,
+    lowSites: [{ siteId: 'b', name: 'B鲸站', amount: '3.02', currency: 'USD', threshold: '5' }],
+    otherCurrencies: ['CNY'],
+  },
+  sites: [
+    { ok: true, siteId: 'a', provider: 'relay:new-api', shape: 'money', source: 'auto', data: { currency: 'USD', total: '10.00', granted: '10.00', toppedUp: '0.00', fullBalance: '20.00' } },
+    { ok: true, siteId: 'b', provider: 'relay:new-api', shape: 'money', source: 'auto', data: { currency: 'USD', total: '3.02', granted: '3.02', toppedUp: '0.00' } },
+    { ok: true, siteId: 'c', provider: 'relay:new-api', shape: 'money', source: 'auto', unlimited: true, spent: '34.58', data: { currency: 'USD', total: '34.58', granted: '34.58', toppedUp: '0.00' } },
+    { ok: false, siteId: 'd', provider: 'relay:new-api', reason: 'blocked', message: 'HTTP 403 疑似 Cloudflare 拦截' },
+  ],
+  health: [
+    { siteId: 'a', health: 'online', status: 200, checkedAt: '2026-10-17T00:00:00.000Z' },
+    { siteId: 'b', health: 'auth-failed', status: 401, checkedAt: '2026-10-17T00:00:00.000Z' },
+  ],
+  refreshedAt: '2026-10-17T00:00:00.000Z',
+};
+
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const pathname = decodeURIComponent(url.pathname);
+
+  // 统一轮询状态（GET /state）：客户端 overlay 唯一的数据来源。
+  // counter 每次请求全局递增（与 host 的 PollStateStore.next() 同口径：单调、同毫秒不重复）
+  // → 客户端首拉记基线、之后每拍 takeChanged 都能捕获变化，正是轮询链路的实拍。
+  // sections.relays 是构造的「3 站 1 无限 1 低额 1 失败 + 1 外币」舰队叶（T04 验收口径），
+  // 与 sections.balance 并存——客户端据此把余额展示切换成舰队口径。
+  if (pathname === '/dsh-pet-7340/state') {
+    stateCounter += 1;
+    sendJson(res, 200, {
+      sections: {
+        balance: {
+          counter: stateCounter,
+          data: { ok: true, provider: 'deepseek', shape: 'money', data: { currency: 'CNY', total: '11.06', granted: '5.00', toppedUp: '10.00' } },
+        },
+        relays: { counter: stateCounter, data: RELAYS_FLEET },
+      },
+      pets: {},
+    });
+    return;
+  }
 
   if (pathname === '/dsh-pet-7340/balance') {
     // 模拟 DeepSeek 余额：fixed 11.06 元 -> 档位 p≈44.7 -> 池索引 2（钱袋如常）

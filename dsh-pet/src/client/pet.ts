@@ -28,7 +28,9 @@ import {
   takeChanged,
 } from '../shared/state';
 import { WORK_STATUS_INDEX, type WorkStatusSnapshot } from '../shared/work-status';
+import { readRelays, relaysAlertKey, relaysBalanceState, type RelaysView } from '../shared/relays';
 import { makeBalanceBubble, makeWhisperBubble } from './bubble';
+import { makeRelayBubble } from './relay-face';
 import { clickScore, SCORE_MIN_SPEED, mountScorePopup, spawnScoreBurst } from '../shared/score-popup';
 import { CANVAS_H, FEET_Y, HIT_BOX, DRAG_THRESHOLD, PET_REF_WIDTH, ANIMATION_EXT } from '../shared/constants';
 // 统一右键菜单：与桌面共用同一份组件（树 + 渲染 + 样式，src/shared/menu.ts）
@@ -138,6 +140,8 @@ export function makePetUI(rt: {
 
   /** 余额气泡（哑组件：数据与显隐由 PetCard 传入） */
   const BalanceBubble = makeBalanceBubble({ h });
+  /** 中转站气泡（哑组件：舰队视图与显隐由 PetCard 传入；与余额气泡共用样式与行口径） */
+  const RelayBubble = makeRelayBubble({ h });
   /** 碎碎念气泡（哑组件：文本与显隐由 PetCard 传入） */
   const WhisperBubble = makeWhisperBubble({ h });
 
@@ -147,6 +151,8 @@ export function makePetUI(rt: {
     balance,
     balanceTick,
     balanceNoticeTick,
+    relays,
+    relayAlertOn,
     workStatus,
     workStatusTick,
     say,
@@ -159,6 +165,10 @@ export function makePetUI(rt: {
     balance: BalanceState | null;
     balanceTick: number;
     balanceNoticeTick: number;
+    /** 中转站舰队视图（sections.relays；host 无启用站点时容器传 null） */
+    relays?: RelaysView | null;
+    /** 新低余额告警的 10s 临时显示（OP-14：恢复前不重复弹，由容器按告警键去重） */
+    relayAlertOn?: boolean;
     workStatus: WorkStatusSnapshot | null;
     workStatusTick: number;
     /** 本宠物的「说一句话」（碎碎念/命令气泡/对话回复三合一；容器从 S 分发下来） */
@@ -1522,6 +1532,11 @@ export function makePetUI(rt: {
           on: whisperBubbleOn,
         });
       }
+      // 中转站气泡优先于单服务商余额气泡：有启用站点时，舰队/焦点站就是用户要看的「余额」。
+      // 新告警（relayAlertOn）时无需 hover 也显示 10s；两者都要求 balanceEnabled（同一开关）。
+      if ((bubbleOn || relayAlertOn) && relays && cfg.balanceEnabled) {
+        return h(RelayBubble, { view: relays, on: bubbleOn || relayAlertOn });
+      }
       if (bubbleOn && balance && cfg.balanceEnabled) {
         return h(BalanceBubble, { state: balance, on: bubbleOn });
       }
@@ -1610,6 +1625,12 @@ export function makePetUI(rt: {
     // 存 ref 而非 useCallback：/state 轮询 effect 的依赖数组保持 [ready] 不变，
     // 同时规避引用每次渲染都变化导致的重复建 effect（本文件已有的 ref 同步写法）。
     // explicit：这次写入是不是手动触发的（host 在叶子里标了 manual，见 shared/state 的 readBalance）。
+    // 中转站舰队（sections.relays）：与 sections.balance **并存**——host 有启用站点时每拍都写，
+    // 客户端据此把「余额展示」切换成舰队/焦点站口径；无可计站时不动余额槽（回落到单服务商）。
+    const [relays, setRelays] = useState<RelaysView | null>(null);
+    // 新低余额告警的临时显示：key 变化才算新告警（OP-14：余额继续跌不重复弹，恢复后 key 变化才再弹）
+    const [relayAlertOn, setRelayAlertOn] = useState(false);
+    const relayAlertKeyRef = useRef('');
     const applyBalanceRef = useRef<(state: BalanceState, explicit: boolean) => void>(() => {});
     applyBalanceRef.current = (state, explicit) => {
       setBalance(state);
@@ -1725,6 +1746,25 @@ export function makePetUI(rt: {
             if (path === 'sections.balance') {
               const hit = readBalance(leaf);
               if (hit) applyBalanceRef.current(hit.state, hit.manual);
+            } else if (path === 'sections.relays') {
+              // 中转站舰队（host 有启用站点时每拍写；失败形状 ok:false → readRelays 返回 null，跳过）
+              const view = readRelays(leaf.data);
+              if (view) {
+                setRelays(view);
+                // 六档档位动画：舰队汇总（或焦点站）折成 money 形态喂既有动画机；
+                // 无限额度焦点站 / 无可计站 → 不喂（没有「剩余」概念，不伪造 0）
+                const folded = relaysBalanceState(view);
+                if (folded) applyBalanceRef.current(folded, false);
+                // 新告警 → 气泡临时显示 10s（去重键见 shared/relays.ts）
+                const key = relaysAlertKey(view);
+                if (key && key !== relayAlertKeyRef.current) {
+                  relayAlertKeyRef.current = key;
+                  setRelayAlertOn(true);
+                  window.setTimeout(() => setRelayAlertOn(false), 10_000);
+                } else if (!key) {
+                  relayAlertKeyRef.current = '';
+                }
+              }
             } else if (path === 'sections.workStatus') {
               const snap = readWorkStatus(leaf);
               if (snap) {
@@ -1777,6 +1817,8 @@ export function makePetUI(rt: {
             balance,
             balanceTick,
             balanceNoticeTick,
+            relays,
+            relayAlertOn,
             workStatus,
             workStatusTick,
             say: sayRef.current[p.id],
