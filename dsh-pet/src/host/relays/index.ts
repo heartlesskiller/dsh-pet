@@ -10,6 +10,7 @@
 
 import { getCredential } from './store';
 import { newApiProvider } from './providers/newapi';
+import { openaiCompatProvider } from './providers/openai-compat';
 import { sumMoney } from '../balance/internal';
 import type {
   RelayBalanceResult,
@@ -19,7 +20,7 @@ import type {
 } from './types';
 
 /** 已登记的站点类型（登记口径：只收有接口的，其余 → `unsupported`） */
-export const RELAY_PROVIDERS: RelayProvider[] = [newApiProvider];
+export const RELAY_PROVIDERS: RelayProvider[] = [newApiProvider, openaiCompatProvider];
 
 /** 站点类型 → provider；未登记返回 undefined（= 不支持查询） */
 export function matchRelayProvider(kind: string): RelayProvider | undefined {
@@ -33,6 +34,33 @@ export function supportedKinds(): string[] {
 
 /** 并发上限。中转站多为小站，并发打过去容易触发限流/CF，保守取 4 */
 const CONCURRENCY = 4;
+
+// ---------- 站点级失败退避（T05/G1'：429 风险的现实对冲） ----------
+
+/**
+ * 连续失败的指数退避：1s → 2s → 4s → … 封顶 60s（**纯函数**，可无时钟测试）。
+ * 参数是经验值（11-plan 假设 #5），待真机观察校准（V5）。
+ */
+export function failureBackoffDelay(consecutiveFailures: number): number {
+  const n = Math.max(0, Math.floor(consecutiveFailures));
+  return Math.min(60_000, 1_000 * 2 ** Math.max(0, n - 1));
+}
+
+/** 失败记忆（进程内，重启清零可接受）：siteId → { 连续失败数, 下次允许尝试的时间戳 } */
+const failureMemory = new Map<string, { count: number; nextAllowedAt: number }>();
+
+/** 清空失败记忆（测试用；也让「用户手动重试」有地方可调） */
+export function resetFailureMemory(): void {
+  failureMemory.clear();
+}
+
+/** 记录一次失败（返回退避时长） */
+function noteFailure(siteId: string, now: number): number {
+  const count = (failureMemory.get(siteId)?.count ?? 0) + 1;
+  const delay = failureBackoffDelay(count);
+  failureMemory.set(siteId, { count, nextAllowedAt: now + delay });
+  return delay;
+}
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -96,6 +124,21 @@ export async function querySiteBalance(dir: string, site: RelaySite): Promise<Re
     return { ok: false, siteId: site.id, provider: pid, reason: 'credential-missing', message: '未配置凭证' };
   }
 
+  // 失败退避中：不发起请求（429 风险的对冲；N 站 × 周期轮询打一个正在失败的站没有意义）
+  const memo = failureMemory.get(site.id);
+  const now = Date.now();
+  if (memo && memo.nextAllowedAt > now) {
+    return {
+      ok: false,
+      siteId: site.id,
+      provider: pid,
+      reason: 'rate-limited',
+      message:
+        '失败退避中（连续第 ' + memo.count + ' 次失败），' +
+        Math.ceil((memo.nextAllowedAt - now) / 1000) + 's 后自动重试',
+    };
+  }
+
   try {
     const r = await provider.fetch({
       siteId: site.id,
@@ -105,11 +148,13 @@ export async function querySiteBalance(dir: string, site: RelaySite): Promise<Re
       extraHeaders: cred.extraHeaders,
       quotaPerUnit: site.quotaPerUnit,
     });
+    failureMemory.delete(site.id); // 成功：清除失败记忆
     // 换算率未确认（建站默认 / 探测失败，修订 #11）→ 打标：客户端提示核对，
     // 且该站不参与低余额告警（OP-6：数据不可靠不评估）
     if (site.rateConfirmed !== true) return { ...r, siteId: site.id, rateUnconfirmed: true };
     return { ...r, siteId: site.id };
   } catch (e) {
+    noteFailure(site.id, Date.now());
     const msg = errMessage(e);
     if (site.manualBalance) return manualResult(site, '自动查询失败（' + msg + '），使用手工填写值');
     return { ok: false, siteId: site.id, provider: pid, reason: classifyBalanceError(e), message: msg };
@@ -150,14 +195,36 @@ export async function checkSiteHealth(dir: string, site: RelaySite): Promise<Rel
   }
 }
 
-/** 并发跑批（信号量限流；单个站点的异常已被 querySiteBalance 吃掉，这里再兜一层） */
-export async function queryAllBalances(dir: string, sites: RelaySite[]): Promise<RelayBalanceResult[]> {
+/**
+ * 并发跑批（信号量限流；单个站点的异常已被 querySiteBalance 吃掉，这里再兜一层）。
+ *
+ * `deadlineMs`（默认 4000，OP-7）：到点后**不再新起**查询（在飞的自然完成），
+ * 未开始的站点落一条显式「本次跳过」——下个周期照常重试。
+ * 这样舰队刷新的总耗时被约束在 deadline + 单站超时内，N 站全挂也不会拖死刷新链。
+ */
+export async function queryAllBalances(
+  dir: string,
+  sites: RelaySite[],
+  options: { deadlineMs?: number } = {},
+): Promise<RelayBalanceResult[]> {
+  const deadlineMs = options.deadlineMs ?? 4_000;
+  const deadline = Date.now() + deadlineMs;
   const out: RelayBalanceResult[] = new Array(sites.length);
   let cursor = 0;
   const worker = async (): Promise<void> => {
     for (;;) {
       const i = cursor++;
       if (i >= sites.length) return;
+      if (Date.now() > deadline) {
+        out[i] = {
+          ok: false,
+          siteId: sites[i].id,
+          provider: 'relay:' + sites[i].kind,
+          reason: 'fetch-error',
+          message: '本次舰队刷新已达 ' + deadlineMs + 'ms 上限，跳过（下周期重试）',
+        };
+        continue;
+      }
       try {
         out[i] = await querySiteBalance(dir, sites[i]);
       } catch (e) {

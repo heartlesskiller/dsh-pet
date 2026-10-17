@@ -7,9 +7,11 @@ import { test } from 'node:test';
 import {
   RELAY_PROVIDERS,
   aggregateBalances,
+  failureBackoffDelay,
   matchRelayProvider,
   queryAllBalances,
   querySiteBalance,
+  resetFailureMemory,
   selectLowSites,
   supportedKinds,
 } from './index.ts';
@@ -36,13 +38,13 @@ function badResult(siteId: string, reason: 'fetch-error' | 'credential-missing' 
   return { ok: false, siteId, provider: 'relay:new-api', reason };
 }
 
-test('注册表：new-api 已登记，sub2api / 未知类型未登记', () => {
+test('注册表：new-api 与 openai-compat 已登记，sub2api / 未知类型未登记', () => {
   assert.ok(matchRelayProvider('new-api'));
-  // sub2api / openai-compat 契约里声明了但适配器还没写 → 必须落 unsupported，不能静默通过
+  assert.ok(matchRelayProvider('openai-compat'));
+  // sub2api 契约里声明了但适配器还没写 → 必须落 unsupported，不能静默通过
   assert.equal(matchRelayProvider('sub2api'), undefined);
-  assert.equal(matchRelayProvider('openai-compat'), undefined);
   assert.equal(matchRelayProvider('bogus'), undefined);
-  assert.deepEqual(supportedKinds(), ['new-api']);
+  assert.deepEqual(supportedKinds(), ['new-api', 'openai-compat']);
 });
 
 test('querySiteBalance：未登记类型 → unsupported（不静默失败）', async () => {
@@ -310,6 +312,7 @@ test('querySiteBalance：A6 —— provider 抛 blocked / rate-limited → 归�
       assert.match(r.message ?? '', /Cloudflare/);
     },
   );
+  resetFailureMemory(); // 失败会记退避：下一段断言要清掉记忆，否则被退避短路
   await withFakeProvider(
     async () => {
       throw classifiedError('relays: HTTP 429 站点限流', 'rate-limited', 429);
@@ -321,6 +324,7 @@ test('querySiteBalance：A6 —— provider 抛 blocked / rate-limited → 归�
       assert.equal(r.reason, 'rate-limited');
     },
   );
+  resetFailureMemory();
   await withFakeProvider(
     async () => {
       throw new Error('plain failure');
@@ -332,6 +336,109 @@ test('querySiteBalance：A6 —— provider 抛 blocked / rate-limited → 归�
       assert.equal(r.reason, 'fetch-error', '无分类 code 的普通错误归 fetch-error');
     },
   );
+  resetFailureMemory();
+});
+
+// ---------- T05：失败退避 + 舰队 deadline ----------
+
+test('failureBackoffDelay：1s 起倍增至 60s 封顶（纯函数）', () => {
+  assert.equal(failureBackoffDelay(0), 1_000);
+  assert.equal(failureBackoffDelay(1), 1_000);
+  assert.equal(failureBackoffDelay(2), 2_000);
+  assert.equal(failureBackoffDelay(3), 4_000);
+  assert.equal(failureBackoffDelay(10), 60_000, '封顶 60s');
+  assert.equal(failureBackoffDelay(999), 60_000);
+});
+
+test('querySiteBalance：连续失败 → 退避期内不再发起请求（429 对冲）', async () => {
+  const dir = tmp();
+  const s = mkSite(dir);
+  putCredential(dir, s.id, { kind: 'api-key', secret: 'sk-test' });
+  let calls = 0;
+  const boom = async () => {
+    calls += 1;
+    throw classifiedError('relays: HTTP 500', 'http', 500);
+  };
+  await withFakeProvider(boom, async () => {
+    const r1 = await querySiteBalance(dir, s);
+    assert.equal(r1.ok, false);
+    if (r1.ok) return;
+    assert.equal(r1.reason, 'fetch-error');
+  });
+  assert.equal(calls, 1, '第一次真的打了');
+  await withFakeProvider(boom, async () => {
+    const r2 = await querySiteBalance(dir, s);
+    assert.equal(r2.ok, false);
+    if (r2.ok) return;
+    assert.equal(r2.reason, 'rate-limited', '退避期内短路成 rate-limited');
+    assert.match(r2.message ?? '', /失败退避中/);
+  });
+  assert.equal(calls, 1, '退避期内没有第二次请求——打一个正在失败的站没有意义');
+  resetFailureMemory();
+});
+
+test('querySiteBalance：成功后清除失败记忆（恢复后立刻可查）', async () => {
+  const dir = tmp();
+  const s = mkSite(dir);
+  putCredential(dir, s.id, { kind: 'api-key', secret: 'sk-test' });
+  await withFakeProvider(
+    async () => {
+      throw classifiedError('relays: HTTP 500', 'http', 500);
+    },
+    async () => {
+      await querySiteBalance(dir, s);
+    },
+  );
+  resetFailureMemory(); // 不等 1s 退避：直接验证「成功即清除」的下一拍
+  let calls = 0;
+  await withFakeProvider(
+    async () => {
+      calls += 1;
+      return { ok: true, provider: 'relay:new-api', shape: 'money', source: 'auto', data: { currency: 'USD', total: '1.00', granted: '1.00', toppedUp: '0.00' } };
+    },
+    async () => {
+      const r = await querySiteBalance(dir, s);
+      assert.equal(r.ok, true);
+    },
+  );
+  assert.equal(calls, 1);
+  // 成功后再来一次：仍然直通（记忆已清）
+  await withFakeProvider(
+    async () => {
+      calls += 1;
+      return { ok: true, provider: 'relay:new-api', shape: 'money', source: 'auto', data: { currency: 'USD', total: '1.00', granted: '1.00', toppedUp: '0.00' } };
+    },
+    async () => {
+      const r = await querySiteBalance(dir, s);
+      assert.equal(r.ok, true);
+    },
+  );
+  assert.equal(calls, 2);
+  resetFailureMemory();
+});
+
+test('queryAllBalances：deadline 到点 → 未开始的站点显式跳过（下周期重试），不静默丢', async () => {
+  const dir = tmp();
+  const sites = Array.from({ length: 8 }, (_, i) => mkSite(dir, { name: 'S' + i, url: 'https://s' + i + '.example.com' }));
+  // 全部带凭证：4 个 worker 会同时挂在飞（每次 60ms），10ms deadline 到点后，
+  // 剩下的站点应当被显式跳过而不是继续排队开打
+  for (const s of sites) putCredential(dir, s.id, { kind: 'api-key', secret: 'sk-test' });
+  let calls = 0;
+  await withFakeProvider(
+    async () => {
+      calls += 1;
+      await new Promise((r) => setTimeout(r, 60));
+      return { ok: true, provider: 'relay:new-api', shape: 'money', source: 'auto', data: { currency: 'USD', total: '1.00', granted: '1.00', toppedUp: '0.00' } };
+    },
+    async () => {
+      const results = await queryAllBalances(dir, sites, { deadlineMs: 10 });
+      assert.equal(results.length, sites.length, '每个站都要有结果（不能缺位）');
+      const skipped = results.filter((r) => !r.ok && r.reason === 'fetch-error' && (r.message ?? '').includes('上限'));
+      assert.ok(skipped.length >= 1, '超时后未开始的站必须显式跳过：' + JSON.stringify(results.map((r) => (r.ok ? 'ok' : r.reason))));
+      assert.ok(calls < sites.length, '不该把全部站都打完：calls=' + calls);
+    },
+  );
+  resetFailureMemory();
 });
 
 test('querySiteBalance：自动失败 + 有手工值 → 用手工值（message 说明原因，不冒充实时）', async () => {

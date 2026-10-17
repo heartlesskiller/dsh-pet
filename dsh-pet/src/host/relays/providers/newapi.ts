@@ -118,16 +118,18 @@ export interface NewApiBalanceSuccess {
  *  money 形态成功结果构造。
  * 不变量（上游口径）：`sumMoney(granted, toppedUp) === total` —— 中转站不区分赠送/充值，
  * 硬拆会造出不存在的语义，故 `granted = total`、`toppedUp = '0.00'`。
+ * `provider` 可覆写：openai-compat 适配器复用同一构造函数（见 ./openai-compat.ts）。
  */
 function moneySuccess(fields: {
   scope: 'account' | 'token';
   data: MoneyBalance;
+  provider?: string;
   unlimited?: boolean;
   spent?: string;
 }): NewApiBalanceSuccess {
   return {
     ok: true,
-    provider: RELAY_PROVIDER_PREFIX + 'new-api',
+    provider: fields.provider ?? RELAY_PROVIDER_PREFIX + 'new-api',
     shape: 'money',
     source: 'auto',
     scope: fields.scope,
@@ -404,7 +406,7 @@ async function getJson(url: string, ctx: RelayFetchContext, timeoutMs = 20_000):
 }
 
 /**
- * billing 双端点取数（api-key 链路的第 ② 级）。
+ * billing 双端点取数（api-key 链路的第 ② 级；openai-compat 适配器也复用它）。
  *
  * 真站事实（F4）：`/dashboard/billing/subscription` 与 `/v1/dashboard/billing/usage`
  * 两条路径都注册（`/v1` 前缀不是版本分界）；只要 API Key（中间件 `TokenAuth()`）。
@@ -412,10 +414,13 @@ async function getJson(url: string, ctx: RelayFetchContext, timeoutMs = 20_000):
  *
  * ⚠️ 剩余公式 `hard_limit_usd − total_usage/100` 在**非无限 Key** 上**【待验证】**
  * （docs/10 V2：实测站令牌是 unlimited，公式无法实测；需要一个有额度的 Key）。
+ *
+ * @param providerId 结果里的 provider 标识（默认 `relay:new-api`）
  */
-async function fetchViaBilling(
+export async function fetchViaBilling(
   base: string,
   ctx: RelayFetchContext,
+  providerId: string = RELAY_PROVIDER_PREFIX + 'new-api',
 ): Promise<NewApiBalanceSuccess> {
   const [subBody, usageBody] = await Promise.all([
     getJson(base + '/dashboard/billing/subscription', ctx),
@@ -426,6 +431,7 @@ async function fetchViaBilling(
   if (sub.unlimited) {
     return moneySuccess({
       scope: 'token',
+      provider: providerId,
       unlimited: true,
       spent: usage.usedUsd,
       data: { currency: CURRENCY, total: usage.usedUsd, granted: usage.usedUsd, toppedUp: '0.00' },
@@ -440,6 +446,7 @@ async function fetchViaBilling(
   const total = remaining.toFixed(2);
   return moneySuccess({
     scope: 'token',
+    provider: providerId,
     data: {
       currency: CURRENCY,
       total,
