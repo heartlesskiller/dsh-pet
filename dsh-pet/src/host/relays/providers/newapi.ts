@@ -28,7 +28,7 @@
 
 import type { MoneyBalance } from '../../balance/types';
 import { detectQuotaPerUnit, quotaPerUnitOf, quotaToAmount } from '../money';
-import type { RelayFetchContext, RelayHealthResult, RelayProvider } from '../types';
+import type { RelayFetchContext, RelayHealthResult, RelayModelEntry, RelayProvider } from '../types';
 
 /** 货币：中转站几乎都以美元计费。CNY 站由站点数据自带时另说，这里只做兜底 */
 const CURRENCY = 'USD';
@@ -448,6 +448,74 @@ async function fetchViaBilling(
       fullBalance: sub.hardLimitUsd.toFixed(2),
     },
   });
+}
+
+// ---------- 探测与模型抓取（T03 端点用；失败口径与 fetch 一致） ----------
+
+/**
+ * 探测 `/api/status` 原文（detect 与换算率探测用；该端点免鉴权 —— F8）。
+ * 失败按 getJson 的口径抛带 code 的错误，由调用方决定怎么呈现。
+ */
+export async function probeStatus(baseUrl: string, ctx: RelayFetchContext): Promise<unknown> {
+  return getJson(normalizeBaseUrl(baseUrl) + '/api/status', ctx, 10_000);
+}
+
+/** 探测 `/v1/models` 原文（detect 的强信号；需要凭证） */
+export async function probeModels(baseUrl: string, ctx: RelayFetchContext): Promise<unknown> {
+  return getJson(normalizeBaseUrl(baseUrl) + '/v1/models', ctx, 10_000);
+}
+
+/**
+ * `/api/pricing` 响应 → 模型条目（**纯函数**；带倍率/价格 —— F9）。
+ *
+ * 真站事实：该端点**免鉴权**可读，且带 `model_ratio` / `model_price`（比价原料）；
+ * `model_ratio: 0` 是合法值（按次计费模型），`null`/缺失才不给键。
+ */
+export function parsePricing(body: unknown): RelayModelEntry[] {
+  const root = obj(body);
+  const list = Array.isArray(root?.data)
+    ? (root!.data as unknown[])
+    : Array.isArray(body)
+      ? (body as unknown[])
+      : undefined;
+  if (!list) throw new Error('relays: /api/pricing 响应里找不到模型数组');
+  const out: RelayModelEntry[] = [];
+  for (const item of list) {
+    const o = obj(item);
+    const name = typeof o?.model_name === 'string' ? o.model_name : typeof o?.id === 'string' ? o.id : '';
+    if (name.length === 0) continue;
+    const ratioRaw = o?.model_ratio;
+    const priceRaw = o?.model_price;
+    out.push({
+      id: name,
+      ...(ratioRaw !== undefined && ratioRaw !== null && Number.isFinite(Number(ratioRaw)) ? { ratio: Number(ratioRaw) } : {}),
+      ...(priceRaw !== undefined && priceRaw !== null && Number.isFinite(Number(priceRaw)) ? { price: Number(priceRaw) } : {}),
+    });
+  }
+  if (out.length === 0) throw new Error('relays: /api/pricing 返回 0 个模型');
+  // 去重 + 排序，保证同站点多次拉取结果稳定（便于对比与快照）
+  const seen = new Map<string, RelayModelEntry>();
+  for (const m of out) if (!seen.has(m.id)) seen.set(m.id, m);
+  return [...seen.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * 抓取站点模型清单：**优先 `/api/pricing`**（带倍率，修订 #14），失败回落 `/v1/models`。
+ * 被拦截 / 被限流不回落（重试只会加重对方负担），直接上抛。
+ */
+export async function fetchSiteModels(
+  baseUrl: string,
+  ctx: RelayFetchContext,
+): Promise<{ source: 'pricing' | 'models'; models: RelayModelEntry[] }> {
+  const base = normalizeBaseUrl(baseUrl);
+  try {
+    return { source: 'pricing', models: parsePricing(await getJson(base + '/api/pricing', ctx, 15_000)) };
+  } catch (e) {
+    if (isBlockedOrLimited(e)) throw e;
+    // pricing 拿不到（404 / 需鉴权 / 形状不同）→ 回落 /v1/models（只有 id，没有倍率）
+  }
+  const models = parseModels(await getJson(base + '/v1/models', ctx, 15_000));
+  return { source: 'models', models: models.map((id) => ({ id })) };
 }
 
 // ---------- provider ----------

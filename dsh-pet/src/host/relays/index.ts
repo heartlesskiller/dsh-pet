@@ -42,7 +42,7 @@ function errMessage(e: unknown): string {
  * fetch 层错误 → 结构化 reason（A6： blocked / rate-limited 与 fetch-error 文案必须区分）。
  * 判定依据 provider 抛错时带的 `code`（见 providers/newapi.ts 的 classifiedError）。
  */
-function classifyBalanceError(e: unknown): 'blocked' | 'rate-limited' | 'fetch-error' {
+export function classifyBalanceError(e: unknown): 'blocked' | 'rate-limited' | 'fetch-error' {
   const code = (e as { code?: unknown }).code;
   if (code === 'blocked') return 'blocked';
   if (code === 'rate-limited') return 'rate-limited';

@@ -16,7 +16,7 @@
 
 import { containsSecret } from './redact';
 import type { CredentialMap } from './store';
-import type { RelayCredential, RelayCredentialKind } from './types';
+import type { RelayCredential, RelayCredentialKind, RelayModelCache, RelaySite } from './types';
 
 // ---------- 错误口径 ----------
 
@@ -40,22 +40,30 @@ export type RelayRoute =
   | { action: 'refresh-all' }
   | { action: 'health'; id: string }
   | { action: 'manual-balance'; id: string }
+  | { action: 'detect' }
+  | { action: 'models' }
+  | { action: 'site-models'; id: string }
+  | { action: 'focus' }
   | { action: 'unknown' };
 
 /**
  * 解析 `/relays` 之后的剩余路径。
  *
  * 形如：`relays` / `relays/{id}` / `relays/{id}/refresh` / `relays/{id}/health`
- * / `relays/{id}/manual-balance` / `relays/refresh-all`。
+ * / `relays/{id}/manual-balance` / `relays/{id}/models` / `relays/refresh-all`
+ * / `relays/detect` / `relays/models` / `relays/focus`。
  *
  * 多段 / 空 id / 未知子动作 → `unknown`（调用方回 404，**不猜**意图）。
- * 注意 `refresh-all` 是保留字：一个 id 叫 `refresh-all` 的站点会被它挡住——
- * 可接受，站点 id 由服务端 `randomUUID()` 生成，不会是这个词。
+ * 注意 `refresh-all`/`detect`/`models`/`focus` 是保留字：一个 id 叫这些词的站点会被挡住——
+ * 可接受，站点 id 由服务端 `randomUUID()` 生成，不会是这些词。
  */
 export function parseRelayRoute(rest: string): RelayRoute {
   if (rest === 'relays') return { action: 'collection' };
   if (rest === 'relays/refresh-all') return { action: 'refresh-all' };
-  const m = /^relays\/([^/]+)(?:\/(refresh|health|manual-balance))?$/.exec(rest);
+  if (rest === 'relays/detect') return { action: 'detect' };
+  if (rest === 'relays/models') return { action: 'models' };
+  if (rest === 'relays/focus') return { action: 'focus' };
+  const m = /^relays\/([^/]+)(?:\/(refresh|health|manual-balance|models))?$/.exec(rest);
   if (!m) return { action: 'unknown' };
   const id = m[1];
   switch (m[2]) {
@@ -65,6 +73,8 @@ export function parseRelayRoute(rest: string): RelayRoute {
       return { action: 'refresh', id };
     case 'health':
       return { action: 'health', id };
+    case 'models':
+      return { action: 'site-models', id };
     default:
       return { action: 'manual-balance', id };
   }
@@ -152,5 +162,112 @@ export function parseCredential(raw: unknown): { ok: true; value: RelayCredentia
   return {
     ok: true,
     value: { kind: kind as RelayCredentialKind, secret, ...(Object.keys(headers).length > 0 ? { extraHeaders: headers } : {}) },
+  };
+}
+
+// ---------- detect 入参（T03：识别不落库，凭证只用于本次探测） ----------
+
+export interface DetectInput {
+  url: string;
+  /** 探测用凭证（**不落库**）；缺省 = 只探免鉴权的 /api/status */
+  credential?: RelayCredential;
+}
+
+/**
+ * 解析 `POST /relays/detect` 入参。
+ * `credential.kind === 'manual'` 视为无凭证探测（manual 的意义就是「不凭任何东西查」）。
+ */
+export function parseDetectInput(raw: unknown): { ok: true; value: DetectInput } | { ok: false; message: string } {
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const url = typeof o.url === 'string' ? o.url.trim() : '';
+  if (url.length === 0) return { ok: false, message: '缺少站点 URL' };
+  if (!Object.prototype.hasOwnProperty.call(o, 'credential')) return { ok: true, value: { url } };
+  const cred = parseCredential(o.credential);
+  if (!cred.ok) return cred;
+  if (cred.value.kind === 'manual') return { ok: true, value: { url } };
+  return { ok: true, value: { url, credential: cred.value } };
+}
+
+// ---------- focus 入参（T03：焦点站点只影响展示） ----------
+
+/**
+ * 解析 `POST /relays/focus` 入参。空 / 缺失 siteId = **清除焦点**（回到全舰队口径）。
+ * 站点是否存在由调用方查注册表判定（这里只校验形状）。
+ */
+export function parseFocusInput(raw: unknown): { ok: true; siteId: string | null } | { ok: false; message: string } {
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const siteId = typeof o.siteId === 'string' ? o.siteId.trim() : '';
+  return { ok: true, siteId: siteId.length > 0 ? siteId : null };
+}
+
+// ---------- 模型矩阵聚合（T03：GET /relays/models 只读缓存） ----------
+
+/**
+ * 矩阵格子。`available`：true = 该站有这模型；false = 抓过且没有（**明确不可用**，
+ * P0-15 要求列出而不是省略）；null = **未抓过该站清单，未知**（绝不猜成没有）。
+ */
+export interface ModelMatrixCell {
+  siteId: string;
+  name: string;
+  available: boolean | null;
+  ratio?: number;
+  price?: number;
+}
+
+export interface ModelMatrixRow {
+  id: string;
+  sites: ModelMatrixCell[];
+}
+
+/**
+ * 缓存 + 站点 → 模型矩阵（**纯函数**）。
+ *
+ * 口径：行 = 全部已抓模型的并集（按 id 排序）；每行的格子覆盖**全部站点**——
+ * 有=true、抓过没有=false、没抓过=null。`unknownSiteCount` = 从未抓过的站点数
+ * （UI 提示「N 个站未抓取」，不把未知演成没有）。
+ */
+export function aggregateModelMatrix(
+  sites: RelaySite[],
+  cache: RelayModelCache,
+): { rows: ModelMatrixRow[]; unknownSiteCount: number } {
+  const byName = sites.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const rows = new Map<string, ModelMatrixRow>();
+  for (const site of byName) {
+    const entry = cache[site.id];
+    if (!entry) continue; // 未抓过的站：最后统一补「未知」格子
+    const present = new Set(entry.models.map((m) => m.id));
+    for (const model of entry.models) {
+      let row = rows.get(model.id);
+      if (!row) {
+        row = { id: model.id, sites: [] };
+        rows.set(model.id, row);
+      }
+      row.sites.push({
+        siteId: site.id,
+        name: site.name,
+        available: true,
+        ...(model.ratio !== undefined ? { ratio: model.ratio } : {}),
+        ...(model.price !== undefined ? { price: model.price } : {}),
+      });
+    }
+    // 别的站有、这一站抓过但没有 → false（「不可用」而不是不列出）
+    for (const row of rows.values()) {
+      if (present.has(row.id)) continue;
+      if (row.sites.some((c) => c.siteId === site.id)) continue;
+      row.sites.push({ siteId: site.id, name: site.name, available: false });
+    }
+  }
+  // 从未抓过的站 → 每行补 null 格子（未知 ≠ 没有）
+  const unknownSites = byName.filter((s) => !cache[s.id]);
+  for (const row of rows.values()) {
+    for (const site of unknownSites) {
+      if (row.sites.some((c) => c.siteId === site.id)) continue;
+      row.sites.push({ siteId: site.id, name: site.name, available: null });
+    }
+    row.sites.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return {
+    rows: [...rows.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    unknownSiteCount: unknownSites.length,
   };
 }

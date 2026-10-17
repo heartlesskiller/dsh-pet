@@ -50,6 +50,10 @@
  *   /dsh-pet-7340/relays/{id}/refresh  → POST 刷新该站余额（RelayBalanceResult）
  *   /dsh-pet-7340/relays/{id}/health   → POST 连通性探测（RelayHealthResult）
  *   /dsh-pet-7340/relays/{id}/manual-balance → POST 设置/清除手工余额（降级路径）
+ *   /dsh-pet-7340/relays/detect            → POST 站点类型识别（不落库）
+ *   /dsh-pet-7340/relays/models            → GET 模型清单矩阵（只读缓存聚合）
+ *   /dsh-pet-7340/relays/{id}/models       → POST 实时抓取模型清单并写缓存
+ *   /dsh-pet-7340/relays/focus             → POST 设置/清除焦点站点（只影响展示）
  *                                       凭证只进 relay-credentials.json；每个响应体返回前
  *                                       过脱敏自检，检出明文凭证即失败
  *   /dsh-pet-7340/font|pic             → 字体 / 通知图标素材
@@ -119,29 +123,41 @@ import {
 import { profileNameFrom, storageEntries } from './storage-paths';
 import { PollStateStore } from './state';
 import { timeContextOf } from './time-context';
-import { aggregateBalances, checkSiteHealth, queryAllBalances, querySiteBalance } from './relays/index';
+import { aggregateBalances, checkSiteHealth, classifyBalanceError, queryAllBalances, querySiteBalance } from './relays/index';
+import { detectRelayKind } from './relays/detect';
 import {
   assertNoSecret,
+  aggregateModelMatrix,
   collectSecrets,
   normalizeManualBalance,
   parseCredential,
+  parseDetectInput,
+  parseFocusInput,
   parseRelayRoute,
   relayError,
+  relayFail,
 } from './relays/routes';
 import {
   clearCredential,
+  clearFocus,
   getCredential,
   loadCredentials,
   loadSites,
   putCredential,
+  readFocus,
+  readModelCache,
   removeSite,
   saveSites,
+  setSiteModels,
   siteViews,
   toSiteView,
   upsertSite,
+  writeFocus,
   type SiteInput,
 } from './relays/store';
-import type { RelayCredential, RelaySite } from './relays/types';
+import { DEFAULT_QUOTA_PER_UNIT } from './relays/money';
+import { fetchSiteModels, probeModels, probeStatus } from './relays/providers/newapi';
+import type { RelayCredential, RelayFetchContext, RelaySite } from './relays/types';
 import {
   HelperProcess,
   defaultElectronExe,
@@ -718,6 +734,9 @@ export function apply(ctx: any): void {
         Promise.all(sites.map((s) => checkSiteHealth(relayDir, s))),
       ]);
       state.writeSection('relays', {
+        // 焦点站点（D2：放 sections.relays 的 data 里，不为一个字段改 state.ts 地基）。
+        // 只影响展示口径，绝不做请求转发（Q4 Non-Goal）。
+        focusSiteId: readFocus(relayDir) ?? null,
         summary: aggregateBalances(sites, results),
         sites: results,
         health,
@@ -952,6 +971,10 @@ export function apply(ctx: any): void {
    *   POST   /relays/refresh-all         并发刷新全部启用站点 → RelayBalanceResult[]
    *   POST   /relays/{id}/health         连通性探测 → RelayHealthResult
    *   POST   /relays/{id}/manual-balance 设置/清除手工余额（查不到时的降级路径）
+   *   POST   /relays/detect              站点类型识别（不落库；body = {url, credential?}）
+   *   GET    /relays/models              模型清单矩阵（只读缓存聚合，不外发抓取）
+   *   POST   /relays/{id}/models         实时抓取该站模型清单并写缓存（优先 pricing 回落 v1/models）
+   *   POST   /relays/focus               设置/清除焦点站点（body = {siteId}；只影响展示）
    *
    * 两条硬口径（与上游既有分支逐条对齐，不新造）：
    * 1. **凭证与站点分文件**：`credential` 只进 `relay-credentials.json`，站点文件里
@@ -1097,6 +1120,88 @@ export function apply(ctx: any): void {
         }
         saveSites(relayDir, sites);
         return reply(200, { ok: true, site: toSiteView(sites[idx], getCredential(relayDir, route.id)) });
+      }
+
+      // ---- /relays/detect（POST，不落库：识别 + 换算率建议）----
+      // 凭证只用于本次探测（打 /v1/models 拿强信号），**不写盘**——识别是「添加站点」的
+      // 引导步骤，用户还没决定建站。探测失败不是 500：回 unknown + 原因，
+      // UI 引导手动选择类型或先手工填余额（P0-3：不静默失败）。
+      if (route.action === 'detect') {
+        if (method !== 'POST') return reply(405, relayError('method not allowed'));
+        const raw = parseBody();
+        if (raw === undefined) return reply(400, relayError('invalid JSON body'));
+        const input = parseDetectInput(raw);
+        if (!input.ok) return reply(400, relayError(input.message));
+        const cred = input.value.credential;
+        const ctx: RelayFetchContext = {
+          siteId: '',
+          baseUrl: input.value.url,
+          secret: cred?.secret ?? '',
+          kind: cred?.kind ?? 'api-key',
+          extraHeaders: cred?.extraHeaders,
+          quotaPerUnit: DEFAULT_QUOTA_PER_UNIT,
+        };
+        let status: unknown;
+        let models: unknown;
+        try {
+          status = await probeStatus(input.value.url, ctx);
+          if (cred) models = await probeModels(input.value.url, ctx);
+        } catch (e) {
+          return reply(200, {
+            ok: true,
+            detect: { kind: 'unknown', confidence: 'unknown', evidence: [], message: e instanceof Error ? e.message : String(e) },
+          });
+        }
+        return reply(200, { ok: true, detect: detectRelayKind({ status, ...(models !== undefined ? { models } : {}) }) });
+      }
+
+      // ---- /relays/models（GET：只读缓存聚合；**周期刷新不抓模型**，要带凭证外发太重）----
+      if (route.action === 'models') {
+        if (method !== 'GET') return reply(405, relayError('method not allowed'));
+        const { rows, unknownSiteCount } = aggregateModelMatrix(loadSites(relayDir), readModelCache(relayDir));
+        return reply(200, { ok: true, rows, unknownSiteCount });
+      }
+
+      // ---- /relays/{id}/models（POST：实时抓取 + 写缓存；优先 /api/pricing 回落 /v1/models）----
+      if (route.action === 'site-models') {
+        if (method !== 'POST') return reply(405, relayError('method not allowed'));
+        const site = findSite(route.id);
+        if (!site) return reply(404, relayError('site not found: ' + route.id));
+        const cred = getCredential(relayDir, site.id);
+        if (!cred || cred.kind === 'manual') {
+          return reply(200, relayFail('credential-missing', '未配置凭证，无法抓取模型清单'));
+        }
+        try {
+          const out = await fetchSiteModels(site.url, {
+            siteId: site.id,
+            baseUrl: site.url,
+            secret: cred.secret,
+            kind: cred.kind,
+            extraHeaders: cred.extraHeaders,
+            quotaPerUnit: site.quotaPerUnit,
+          });
+          setSiteModels(relayDir, site.id, out.models);
+          return reply(200, { ok: true, siteId: site.id, source: out.source, models: out.models, fetchedAt: new Date().toISOString() });
+        } catch (e) {
+          return reply(200, relayFail(classifyBalanceError(e), e instanceof Error ? e.message : String(e)));
+        }
+      }
+
+      // ---- /relays/focus（POST：焦点站点；只影响展示口径，绝不做请求转发 —— Q4）----
+      if (route.action === 'focus') {
+        if (method !== 'POST') return reply(405, relayError('method not allowed'));
+        const raw = parseBody();
+        if (raw === undefined) return reply(400, relayError('invalid JSON body'));
+        const input = parseFocusInput(raw);
+        if (!input.ok) return reply(400, relayError(input.message));
+        if (input.siteId !== null && !findSite(input.siteId)) {
+          return reply(404, relayError('site not found: ' + input.siteId));
+        }
+        if (input.siteId === null) clearFocus(relayDir);
+        else writeFocus(relayDir, input.siteId);
+        // 立即重刷状态叶，让桌宠第一时间按新焦点展示（用户操作，等不了一个刷新周期）
+        if (hasEnabledRelaySites()) await refreshRelays();
+        return reply(200, { ok: true, focusSiteId: input.siteId });
       }
 
       return reply(404, relayError('unknown relays route: ' + rest));

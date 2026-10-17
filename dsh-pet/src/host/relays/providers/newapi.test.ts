@@ -5,15 +5,19 @@ import {
   RELAY_PROVIDER_PREFIX,
   UNLIMITED_SENTINEL_USD,
   classifiedError,
+  fetchSiteModels,
   isBlockedOrLimited,
   newApiProvider,
   normalizeBaseUrl,
   parseModels,
+  parsePricing,
   parseStatus,
   parseSubscription,
   parseTokenUsage,
   parseUsage,
   parseUserSelf,
+  probeModels,
+  probeStatus,
 } from './newapi.ts';
 
 const RATE = 500_000;
@@ -531,8 +535,7 @@ test('fetch：200 + 普通 HTML（无挑战特征）→ http 分类，不神经�
   );
 });
 
-test('health：/api/status 在线 → online + 端点 + 延迟', async () => {
-  const original = globalThis.fetch;
+test('health：/api/status 在线 → online + 端点 + 延迟', async () => {  const original = globalThis.fetch;
   globalThis.fetch = mockFetch({ '/api/status': () => jsonRes(STATUS_REAL) });
   try {
     const r = await newApiProvider.health!({
@@ -591,6 +594,124 @@ test('health：401/403 → 带 status 抛错（编排层归 auth-failed）；429
         return true;
       },
     );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+// ---------- parsePricing（T03：F9 免鉴权带倍率） ----------
+
+/** /api/pricing —— 实测站原文形状（model_ratio / model_price 是比价原料） */
+const PRICING_REAL = {
+  auto_groups: ['default'],
+  data: [
+    { model_name: 'gpt-image-2.5-flare', vendor_id: 4, quota_type: 1, model_ratio: 0, model_price: 12, enable_groups: ['svip', 'vip', 'default'], supported_endpoint_types: ['openai'] },
+    { model_name: 'gpt-4o', vendor_id: 1, quota_type: 0, model_ratio: 0.5, model_price: 0, enable_groups: ['default'] },
+  ],
+};
+
+test('parsePricing：F9 —— 实测站形状 → 倍率/价格随行带上（ratio 0 是合法值）', () => {
+  const out = parsePricing(PRICING_REAL);
+  assert.deepEqual(out, [
+    { id: 'gpt-4o', ratio: 0.5, price: 0 },
+    { id: 'gpt-image-2.5-flare', ratio: 0, price: 12 },
+  ]);
+});
+
+test('parsePricing：缺倍率/价格不给键（null 与缺失都不演成 0）', () => {
+  const out = parsePricing({ data: [{ model_name: 'm1' }, { model_name: 'm2', model_ratio: null, model_price: 2 }] });
+  assert.deepEqual(out, [{ id: 'm1' }, { id: 'm2', price: 2 }]);
+});
+
+test('parsePricing：去重排序；空列表 / 找不到数组 / 非对象 → throw', () => {
+  assert.deepEqual(parsePricing({ data: [{ model_name: 'b' }, { model_name: 'a' }, { model_name: 'b' }] }), [
+    { id: 'a' },
+    { id: 'b' },
+  ]);
+  assert.throws(() => parsePricing({ data: [] }), /0 个模型/);
+  assert.throws(() => parsePricing({}), /找不到模型数组/);
+  assert.throws(() => parsePricing(null), /找不到模型数组/);
+  assert.throws(() => parsePricing({ data: [{ noName: 1 }] }), /0 个模型/);
+});
+
+test('fetchSiteModels：优先 /api/pricing（修订 #14），失败回落 /v1/models', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = mockFetch({
+    '/api/pricing': () => jsonRes(PRICING_REAL),
+    '/v1/models': () => jsonRes({ data: [{ id: 'fallback-only' }] }),
+  });
+  try {
+    const out = await fetchSiteModels('https://st.example.com', {
+      siteId: 's1', baseUrl: 'https://st.example.com', secret: 'sk-test', kind: 'api-key', quotaPerUnit: RATE,
+    });
+    assert.equal(out.source, 'pricing');
+    assert.deepEqual(out.models.map((m) => m.id), ['gpt-4o', 'gpt-image-2.5-flare']);
+  } finally {
+    globalThis.fetch = original;
+  }
+
+  globalThis.fetch = mockFetch({
+    '/api/pricing': () => new Response('nope', { status: 404 }),
+    '/v1/models': () => jsonRes({ data: [{ id: 'from-models' }] }),
+  });
+  try {
+    const out = await fetchSiteModels('https://st.example.com', {
+      siteId: 's1', baseUrl: 'https://st.example.com', secret: 'sk-test', kind: 'api-key', quotaPerUnit: RATE,
+    });
+    assert.equal(out.source, 'models', 'pricing 拿不到 → 回落 v1/models');
+    assert.deepEqual(out.models, [{ id: 'from-models' }], '回落只有 id，没有倍率');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('fetchSiteModels：pricing 被拦/限流 → 不回落，直接按分类上抛', async () => {
+  const original = globalThis.fetch;
+  let modelsHit = 0;
+  globalThis.fetch = mockFetch({
+    '/api/pricing': () => new Response('slow', { status: 429 }),
+    '/v1/models': () => {
+      modelsHit += 1;
+      return jsonRes({ data: [{ id: 'x' }] });
+    },
+  });
+  try {
+    await assert.rejects(
+      () =>
+        fetchSiteModels('https://st.example.com', {
+          siteId: 's1', baseUrl: 'https://st.example.com', secret: 'sk-test', kind: 'api-key', quotaPerUnit: RATE,
+        }),
+      (e: unknown) => {
+        assert.equal((e as { code?: string }).code, 'rate-limited');
+        return true;
+      },
+    );
+    assert.equal(modelsHit, 0, '被限流还去打 v1/models = 加重对方负担');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('probeStatus / probeModels：打对应端点并回传原文', async () => {
+  const original = globalThis.fetch;
+  const hits: string[] = [];
+  globalThis.fetch = mockFetch({
+    '/api/status': () => {
+      hits.push('status');
+      return jsonRes(STATUS_REAL);
+    },
+    '/v1/models': () => {
+      hits.push('models');
+      return jsonRes(MODELS_REAL);
+    },
+  });
+  try {
+    const ctx = { siteId: '', baseUrl: 'https://st.example.com', secret: '', kind: 'api-key' as const, quotaPerUnit: RATE };
+    const status = await probeStatus('https://st.example.com', ctx);
+    assert.equal((status as { data: { system_name: string } }).data.system_name, 'st-api');
+    const models = await probeModels('https://st.example.com', ctx);
+    assert.ok(Array.isArray((models as { data: unknown[] }).data));
+    assert.deepEqual(hits, ['status', 'models']);
   } finally {
     globalThis.fetch = original;
   }

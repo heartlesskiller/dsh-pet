@@ -11,15 +11,19 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import {
+  aggregateModelMatrix,
   assertNoSecret,
   collectSecrets,
   normalizeManualBalance,
   parseCredential,
+  parseDetectInput,
+  parseFocusInput,
   parseRelayRoute,
   relayError,
   relayFail,
 } from './routes.ts';
-import { putCredential, upsertSite } from './store.ts';
+import { loadSites, putCredential, upsertSite } from './store.ts';
+import type { RelayModelCache } from './types.ts';
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), 'relay-routes-'));
@@ -34,6 +38,13 @@ test('parseRelayRoute：六种形状各自归位', () => {
   assert.deepEqual(parseRelayRoute('relays/refresh-all'), { action: 'refresh-all' });
   assert.deepEqual(parseRelayRoute('relays/abc/health'), { action: 'health', id: 'abc' });
   assert.deepEqual(parseRelayRoute('relays/abc/manual-balance'), { action: 'manual-balance', id: 'abc' });
+});
+
+test('parseRelayRoute：T03 三端点 + 站点级 models 各自归位', () => {
+  assert.deepEqual(parseRelayRoute('relays/detect'), { action: 'detect' });
+  assert.deepEqual(parseRelayRoute('relays/models'), { action: 'models' });
+  assert.deepEqual(parseRelayRoute('relays/focus'), { action: 'focus' });
+  assert.deepEqual(parseRelayRoute('relays/abc/models'), { action: 'site-models', id: 'abc' });
 });
 
 test('parseRelayRoute：多段 / 空 id / 未知子动作 → unknown（不猜意图）', () => {
@@ -145,4 +156,80 @@ test('assertNoSecret：没有基线（无凭证）时直接放行；短于 6 位
   assert.doesNotThrow(() => assertNoSecret({ a: 1 }, []));
   // containsSecret 跳过长度 < 6 的值：避免把 "1234" 这类普通数字当成凭证误伤
   assert.doesNotThrow(() => assertNoSecret({ a: 'x1234y' }, ['1234']));
+});
+
+// ---------- detect / focus 入参（T03） ----------
+
+test('parseDetectInput：只有 URL → 免凭证探测（/api/status 就够识别）', () => {
+  assert.deepEqual(parseDetectInput({ url: 'https://a.com' }), { ok: true, value: { url: 'https://a.com' } });
+  assert.deepEqual(parseDetectInput({ url: '  https://a.com  ' }), { ok: true, value: { url: 'https://a.com' } });
+});
+
+test('parseDetectInput：带凭证 → 收下用于本次探测（manual 视为无凭证）', () => {
+  const r = parseDetectInput({ url: 'https://a.com', credential: { kind: 'api-key', secret: 'sk-abcdef' } });
+  assert.deepEqual(r, { ok: true, value: { url: 'https://a.com', credential: { kind: 'api-key', secret: 'sk-abcdef' } } });
+  assert.deepEqual(parseDetectInput({ url: 'https://a.com', credential: { kind: 'manual' } }), { ok: true, value: { url: 'https://a.com' } });
+});
+
+test('parseDetectInput：缺 URL / 坏凭证一律拒绝（不猜）', () => {
+  assert.equal(parseDetectInput({}).ok, false);
+  assert.equal(parseDetectInput({ url: '' }).ok, false);
+  assert.equal(parseDetectInput({ url: 'https://a.com', credential: { kind: 'bogus', secret: 'x' } }).ok, false);
+  assert.equal(parseDetectInput(null).ok, false);
+});
+
+test('parseFocusInput：siteId 原样收下；空 / 缺失 = 清除焦点', () => {
+  assert.deepEqual(parseFocusInput({ siteId: 'abc' }), { ok: true, siteId: 'abc' });
+  assert.deepEqual(parseFocusInput({ siteId: '' }), { ok: true, siteId: null });
+  assert.deepEqual(parseFocusInput({}), { ok: true, siteId: null });
+  assert.deepEqual(parseFocusInput(null), { ok: true, siteId: null });
+});
+
+// ---------- 模型矩阵聚合（T03：GET /relays/models 只读缓存） ----------
+
+test('aggregateModelMatrix：有/无/未知三态分明，倍率价格随行带上', () => {
+  const dir = tmp();
+  try {
+    const a = upsertSite(dir, { name: 'A站', url: 'https://a.example.com', kind: 'new-api' });
+    const b = upsertSite(dir, { name: 'B站', url: 'https://b.example.com', kind: 'new-api' });
+    const c = upsertSite(dir, { name: 'C站', url: 'https://c.example.com', kind: 'new-api' });
+    const cache: RelayModelCache = {
+      [a.id]: { models: [{ id: 'gpt-4o', ratio: 0.5 }, { id: 'claude-3' }], fetchedAt: '2026-10-17T00:00:00.000Z' },
+      [b.id]: { models: [{ id: 'gpt-4o', ratio: 0.25, price: 12 }], fetchedAt: '2026-10-17T00:00:00.000Z' },
+      // C 站从未抓过 → 未知
+    };
+    const { rows, unknownSiteCount } = aggregateModelMatrix(loadSites(dir), cache);
+    assert.equal(unknownSiteCount, 1, 'C 站未抓取');
+
+    const gpt = rows.find((r) => r.id === 'gpt-4o');
+    assert.ok(gpt);
+    assert.deepEqual(gpt.sites, [
+      { siteId: a.id, name: 'A站', available: true, ratio: 0.5 },
+      { siteId: b.id, name: 'B站', available: true, ratio: 0.25, price: 12 },
+      { siteId: c.id, name: 'C站', available: null },
+    ]);
+    const claude = rows.find((r) => r.id === 'claude-3');
+    assert.ok(claude);
+    assert.deepEqual(claude.sites, [
+      { siteId: a.id, name: 'A站', available: true },
+      { siteId: b.id, name: 'B站', available: false }, // 抓过且没有 → 明确不可用（P0-15）
+      { siteId: c.id, name: 'C站', available: null }, // 没抓过 → 未知，绝不猜成没有
+    ]);
+    // 行按 id 排序，结果稳定
+    assert.deepEqual(rows.map((r) => r.id), ['claude-3', 'gpt-4o']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('aggregateModelMatrix：空缓存 → 0 行 + 全部站点未知（不演成「都没有」）', () => {
+  const dir = tmp();
+  try {
+    upsertSite(dir, { name: 'A站', url: 'https://a.example.com', kind: 'new-api' });
+    const { rows, unknownSiteCount } = aggregateModelMatrix(loadSites(dir), {});
+    assert.deepEqual(rows, []);
+    assert.equal(unknownSiteCount, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

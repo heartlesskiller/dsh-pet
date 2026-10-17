@@ -13,18 +13,38 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { DEFAULT_QUOTA_PER_UNIT, quotaPerUnitOf } from './money';
 import { maskHeaders, maskSecret } from './redact';
 import { normalizeBaseUrl } from './providers/newapi';
-import { RELAY_KINDS, type RelayCredential, type RelayCredentialKind, type RelayKind, type RelaySite, type RelaySiteView } from './types';
+import {
+  RELAY_KINDS,
+  type RelayCredential,
+  type RelayCredentialKind,
+  type RelayKind,
+  type RelayModelCache,
+  type RelayModelEntry,
+  type RelaySite,
+  type RelaySiteView,
+} from './types';
 
 /** 站点文件（无任何密钥） */
 export const SITES_FILE = 'relays.json';
 /** 凭证文件（只放密钥；不随站点文件导出） */
 export const CREDENTIALS_FILE = 'relay-credentials.json';
+/**
+ * 焦点站点文件（当前用于展示余额/健康的站点；**只影响展示，绝不做请求转发** —— Q4 Non-Goal）。
+ * 单字段小文件，不进站点实体（D2 裁决：不为一个字段改 state.ts 地基）。
+ */
+export const FOCUS_FILE = 'focus.json';
+/**
+ * 模型清单缓存文件（siteId → {models, fetchedAt}）。
+ * 派生数据、可重新抓取 —— 与 relays.json / relay-credentials.json 不同，
+ * 读坏时不抛错、不改名留存（坏缓存 = 重新抓一次，不是数据丢失）。
+ */
+export const MODELS_FILE = 'models.json';
 
 /**
  * 带 `cause` 的 Error。
@@ -227,6 +247,59 @@ export function clearCredential(dir: string, siteId: string): void {
 /** 该站点的凭证（取不到 → undefined） */
 export function getCredential(dir: string, siteId: string): RelayCredential | undefined {
   return loadCredentials(dir)[siteId];
+}
+
+// ---------- 焦点站点（T03：只影响展示） ----------
+
+/** 当前焦点站点 id（没有 → undefined）。损坏/缺字段 → undefined（派生数据，不抛） */
+export function readFocus(dir: string): string | undefined {
+  let raw: unknown;
+  try {
+    if (!existsSync(join(dir, FOCUS_FILE))) return undefined;
+    raw = JSON.parse(readFileSync(join(dir, FOCUS_FILE), 'utf8'));
+  } catch {
+    return undefined;
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const siteId = (raw as { siteId?: unknown }).siteId;
+  return typeof siteId === 'string' && siteId.length > 0 ? siteId : undefined;
+}
+
+/** 设置焦点站点（调用方已校验站点存在） */
+export function writeFocus(dir: string, siteId: string): void {
+  writeJsonAtomic(join(dir, FOCUS_FILE), { siteId });
+}
+
+/** 清除焦点（回到「全舰队汇总」口径） */
+export function clearFocus(dir: string): void {
+  try {
+    rmSync(join(dir, FOCUS_FILE), { force: true });
+  } catch {
+    // 本来就没有或删不掉：下次 readFocus 会容忍
+  }
+}
+
+// ---------- 模型清单缓存（T03：按需抓取，GET 只读） ----------
+
+/** 读模型缓存。损坏/形状不对 → 空缓存（派生数据，不抛错、不改名留存） */
+export function readModelCache(dir: string): RelayModelCache {
+  let raw: unknown;
+  try {
+    if (!existsSync(join(dir, MODELS_FILE))) return {};
+    raw = JSON.parse(readFileSync(join(dir, MODELS_FILE), 'utf8'));
+  } catch {
+    return {};
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return raw as RelayModelCache;
+}
+
+/** 写入某站的模型清单（整体替换该站条目，带上抓取时间） */
+export function setSiteModels(dir: string, siteId: string, models: RelayModelEntry[]): RelayModelCache {
+  const cache = readModelCache(dir);
+  cache[siteId] = { models, fetchedAt: new Date().toISOString() };
+  writeJsonAtomic(join(dir, MODELS_FILE), cache);
+  return cache;
 }
 
 // ---------- 视图（唯一允许对外的形状） ----------

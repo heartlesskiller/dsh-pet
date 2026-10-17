@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -7,19 +7,26 @@ import { test } from 'node:test';
 import { containsSecret, maskHeaders, maskSecret } from './redact.ts';
 import {
   CREDENTIALS_FILE,
+  FOCUS_FILE,
+  MODELS_FILE,
   SITES_FILE,
   clearCredential,
+  clearFocus,
   getCredential,
   listDataFiles,
   loadCredentials,
   loadSites,
   putCredential,
+  readFocus,
+  readModelCache,
   removeSite,
   saveSites,
+  setSiteModels,
   siteViews,
   toSiteView,
   upsertSite,
   validateSiteInput,
+  writeFocus,
 } from './store.ts';
 import type { RelaySite } from './types.ts';
 
@@ -29,8 +36,8 @@ function tmp(): string {
 
 const SECRET = 'sk-abcdef1234567890wxyz';
 
-function seed(dir: string): RelaySite {
-  return upsertSite(dir, { name: 'A鱼站', url: 'https://a.example.com/v1', kind: 'new-api' });
+function seed(dir: string, over: { name?: string } = {}): RelaySite {
+  return upsertSite(dir, { name: over.name ?? 'A鱼站', url: 'https://a.example.com/v1', kind: 'new-api' });
 }
 
 test('loadSites：目录不存在 → 空列表（不炸）', () => {
@@ -207,4 +214,71 @@ test('containsSecret：短密钥不参与匹配（避免误报）', () => {
   assert.equal(containsSecret('hello sk-abcdef1234567890wxyz', [SECRET]), true);
   assert.equal(containsSecret('hello', ['abc']), false);
   assert.equal(containsSecret('hello', [undefined as never]), false);
+});
+
+// ---------- 焦点站点（T03） ----------
+
+test('focus：写入 / 读取 / 清除往返；缺目录不炸', () => {
+  const dir = tmp();
+  try {
+    assert.equal(readFocus(dir), undefined, '没有 focus.json → 无焦点');
+    const s = seed(dir);
+    writeFocus(dir, s.id);
+    assert.equal(readFocus(dir), s.id);
+    clearFocus(dir);
+    assert.equal(readFocus(dir), undefined, '清除后回到全舰队口径');
+    clearFocus(dir); // 幂等：再清一次不炸
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('focus：损坏的 focus.json → undefined（派生数据可重新设，不抛错）', () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, FOCUS_FILE), 'not-json', 'utf8');
+    assert.equal(readFocus(dir), undefined);
+    // 且能直接覆盖写回去
+    const s = seed(dir);
+    writeFocus(dir, s.id);
+    assert.equal(readFocus(dir), s.id);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- 模型清单缓存（T03） ----------
+
+test('models 缓存：按站写入 / 读回 / 覆盖； fetchedAt 带上', () => {
+  const dir = tmp();
+  try {
+    assert.deepEqual(readModelCache(dir), {}, '没有缓存文件 → 空缓存');
+    const a = seed(dir, { name: 'A' });
+    const b = upsertSite(dir, { name: 'B', url: 'https://b.example.com', kind: 'new-api' });
+    setSiteModels(dir, a.id, [{ id: 'gpt-4o', ratio: 0.5 }]);
+    setSiteModels(dir, b.id, [{ id: 'claude-3' }]);
+    const cache = readModelCache(dir);
+    assert.deepEqual(cache[a.id].models, [{ id: 'gpt-4o', ratio: 0.5 }]);
+    assert.deepEqual(cache[b.id].models, [{ id: 'claude-3' }]);
+    assert.ok(cache[a.id].fetchedAt.length > 0, '抓取时间要记');
+    // 覆盖写入（重新抓取）只换该站条目
+    setSiteModels(dir, a.id, [{ id: 'gpt-4o-mini' }]);
+    const after = readModelCache(dir);
+    assert.deepEqual(after[a.id].models, [{ id: 'gpt-4o-mini' }]);
+    assert.deepEqual(after[b.id].models, [{ id: 'claude-3' }], '不该动别的站');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('models 缓存：损坏的 models.json → 空缓存（可重新抓，不抛错）', () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, MODELS_FILE), '{ broken', 'utf8');
+    assert.deepEqual(readModelCache(dir), {});
+    setSiteModels(dir, 'x', [{ id: 'm' }]);
+    assert.deepEqual(readModelCache(dir)['x'].models, [{ id: 'm' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

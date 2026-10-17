@@ -177,6 +177,30 @@ export interface RelayHealthResult {
   checkedAt: string;
 }
 
+// ---------- 模型清单 ----------
+
+/**
+ * 一个模型条目。
+ * `ratio` / `price` 仅定价接口（`/api/pricing`，F9：免鉴权且带倍率）给得出 ——
+ * 这是「哪家更便宜」的比价原料；从 `/v1/models` 回落拿到的只有 id。
+ */
+export interface RelayModelEntry {
+  id: string;
+  /** 模型倍率（`model_ratio`，按 token 计费的站） */
+  ratio?: number;
+  /** 模型固定价格（`model_price`，按次计费的站） */
+  price?: number;
+}
+
+/**
+ * 模型清单缓存：siteId → { models, fetchedAt }。
+ * **周期刷新不抓模型**（要带凭证外发，太重）；只由 `POST /relays/{id}/models` 按需抓取落盘，
+ * `GET /relays/models` 只读这份缓存聚合成矩阵。
+ */
+export interface RelayModelCache {
+  [siteId: string]: { models: RelayModelEntry[]; fetchedAt: string };
+}
+
 // ---------- provider 契约 ----------
 
 /** 查询上下文：所有站点类型的 `fetch` 收到同一个形状 */
