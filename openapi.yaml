@@ -80,6 +80,12 @@ tags:
     description: 配置的读取、保存与元信息
   - name: Assets
     description: 字体、通知图标、表情包、动画素材
+  - name: Relays
+    description: |
+      中转站管理（`/relays` 子域）——管理多个 LLM API 中转站的资产：余额 / 健康 / 模型清单 / 焦点站。
+      **本子域是「数据直返」例外**：动作类端点直接返回结果数据而不是 `{ ok }`
+      （agent 一次调用就要拿到结果）；该例外只限 `/relays`，不扩散到 `/balance`、`/whisper` 等既有端点。
+      凭证明文零外泄：站点与凭证分文件存储，每个响应体返回前过脱敏自检。
 
 paths:
   /dsh-pet-7340/state:
@@ -929,8 +935,398 @@ paths:
               schema:
                 type: string
 
+  # ---------- 中转站管理（/relays 子域） ----------
+
+  "/dsh-pet-7340/relays":
+    get:
+      tags: [Relays]
+      operationId: listRelaySites
+      summary: 全部站点的脱敏视图
+      description: |
+        返回全部站点 + 脱敏后的凭证摘要（`credential.masked`，形如 `sk-ab****wxyz`）。
+        **响应体绝不含凭证明文**——每个响应返回前过脱敏自检，检出明文该请求直接失败。
+      responses:
+        "200":
+          description: 站点视图数组（按名称排序，结果稳定）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  sites:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RelaySiteView"
+    post:
+      tags: [Relays]
+      operationId: createRelaySite
+      summary: 新建站点（可同时写入凭证）
+      description: |
+        body = 站点字段 + 可选 `credential` 段。凭证与站点**分文件存储**：
+        站点文件（`relays.json`）没有任何密钥字段，凭证只进 `relay-credentials.json`。
+        建站时换算率未显式确认 → 写默认值 500000 且标记未确认（余额带 `rateUnconfirmed`，
+        不参与告警）——**绝不静默默认**。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RelaySiteInput"
+      responses:
+        "200":
+          description: 新建站点的脱敏视图
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  site:
+                    $ref: "#/components/schemas/RelaySiteView"
+        "400":
+          description: 结构性参数错误（坏 JSON / 缺字段 / 非法字段）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  "/dsh-pet-7340/relays/{id}":
+    parameters:
+      - $ref: "#/components/parameters/RelaySiteId"
+    put:
+      tags: [Relays]
+      operationId: updateRelaySite
+      summary: 更新站点（可同时更新/清除凭证）
+      description: |
+        body 同新建；`credential` 段缺省 = 不动，显式 `null` = 清除，对象 = 校验后写入。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RelaySiteInput"
+      responses:
+        "200":
+          description: 更新后的脱敏视图
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  site:
+                    $ref: "#/components/schemas/RelaySiteView"
+        "400":
+          description: 结构性参数错误（坏 JSON / 缺字段 / 非法字段）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: 站点不存在（`site not found`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [Relays]
+      operationId: deleteRelaySite
+      summary: 删站点并删凭证
+      description: 站点与凭证一起删（不留孤儿密钥文件）。
+      responses:
+        "200":
+          description: 删除后剩余站点的脱敏视图
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  sites:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RelaySiteView"
+        "404":
+          description: 站点不存在（`site not found`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  "/dsh-pet-7340/relays/refresh-all":
+    post:
+      tags: [Relays]
+      operationId: refreshAllRelays
+      summary: 并发刷新全部启用站点
+      description: |
+        并发度 4（中转站多为小站，保守）；默认 4s 舰队 deadline，到点未开始的站显式跳过
+        （下周期重试）；连续失败的站进入指数退避（1s→2s→4s…封顶 60s），退避期内不发起请求。
+      responses:
+        "200":
+          description: 各站结果数组（顺序与入站顺序一致）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RelayBalanceResult"
+
+  "/dsh-pet-7340/relays/{id}/refresh":
+    parameters:
+      - $ref: "#/components/parameters/RelaySiteId"
+    post:
+      tags: [Relays]
+      operationId: refreshRelaySite
+      summary: 刷新该站余额
+      description: |
+        取数链路按凭证类型分流（凭证类型之间**不自动降级**）：
+        `api-key` → `/api/usage/token/` → billing 双端点；`access-token` → `/api/user/self`
+        → `/api/usage/token/` → billing。失败时：有手工值回退手工（标注来源），否则报错。
+        **绝不伪造 0 余额。**
+      responses:
+        "200":
+          description: 该站余额结果（六种 reason，见 RelayBalanceResult）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelayBalanceResult"
+        "404":
+          description: 站点不存在（`site not found`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  "/dsh-pet-7340/relays/{id}/health":
+    parameters:
+      - $ref: "#/components/parameters/RelaySiteId"
+    post:
+      tags: [Relays]
+      operationId: checkRelayHealth
+      summary: 连通性探测
+      description: |
+        低开销探测（new-api 系打 `/api/status`，免鉴权），区分
+        `online` / `unreachable` / `auth-failed`（401/403）/ `blocked` / `unknown`。
+        没有探测实现的站点类型（如 openai-compat）返回 `unknown` + 原因，不假装探了。
+      responses:
+        "200":
+          description: 探测结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelayHealthResult"
+        "404":
+          description: 站点不存在（`site not found`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  "/dsh-pet-7340/relays/{id}/manual-balance":
+    parameters:
+      - $ref: "#/components/parameters/RelaySiteId"
+    post:
+      tags: [Relays]
+      operationId: setRelayManualBalance
+      summary: 设置/清除手工余额（降级路径）
+      description: |
+        自动查询失败时允许用户手工填写余额并标记「手工」。空 `amount` = 清除（撤销降级）。
+        手工值在界面上必须带「手工」标签与填写时间，不得伪装成实时数据；不参与自动刷新覆盖。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: string
+                  description: "非负金额（至多两位小数）；空串 = 清除"
+                currency:
+                  type: string
+                  description: "币种（统一大写，如 USD / CNY）"
+      responses:
+        "200":
+          description: 设置后的脱敏视图
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  site:
+                    $ref: "#/components/schemas/RelaySiteView"
+        "400":
+          description: 结构性参数错误（坏 JSON / 缺字段 / 非法字段）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: 站点不存在（`site not found`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  "/dsh-pet-7340/relays/detect":
+    post:
+      tags: [Relays]
+      operationId: detectRelayKind
+      summary: 站点类型识别（不落库）
+      description: |
+        body = `{ url, credential? }`。探 `/api/status`（免鉴权）拿 new-api 特征字段，
+        有凭证再探 `/v1/models` 拿 `supported_endpoint_types` 强信号；返回
+        `{ kind, confidence, evidence[], suggestedQuotaPerUnit?, displayInCurrency? }`。
+        识别依据**只信特征字段**——`system_name` 会被站长自定义、`version` 可能为空，
+        两者都不可用于判类型（真站实测结论）。
+        凭证只用于本次探测，**不写盘**；探测失败返回 `kind: 'unknown'` + 原因，
+        引导调用方手动选择类型或手工填余额（不静默失败）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                credential:
+                  $ref: "#/components/schemas/RelayCredentialInput"
+      responses:
+        "200":
+          description: 识别结果（失败也是 200 + unknown，由调用方决定下一步）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  detect:
+                    $ref: "#/components/schemas/RelayDetectResult"
+
+  "/dsh-pet-7340/relays/models":
+    get:
+      tags: [Relays]
+      operationId: getRelayModelMatrix
+      summary: 模型清单矩阵（只读缓存聚合）
+      description: |
+        聚合各站已缓存的模型清单成矩阵：行 = 模型（并集，按 id 排序），格子三态——
+        `available: true`（该站有）/ `false`（抓过且没有，明确不可用）/ `null`（未抓过，未知）。
+        **只读缓存、不外发抓取**：实时抓取走 `POST /relays/{id}/models`（要带凭证，太重，
+        不进周期刷新）。`unknownSiteCount` = 从未抓过的站点数。
+      responses:
+        "200":
+          description: 模型矩阵
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  rows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RelayModelRow"
+                  unknownSiteCount:
+                    type: integer
+
+  "/dsh-pet-7340/relays/{id}/models":
+    parameters:
+      - $ref: "#/components/parameters/RelaySiteId"
+    post:
+      tags: [Relays]
+      operationId: fetchRelayModels
+      summary: 实时抓取该站模型清单并写缓存
+      description: |
+        优先 `/api/pricing`（免鉴权、带 `model_ratio` / `model_price` 倍率——比价原料），
+        失败回落 `/v1/models`（只有 id）。被拦截 / 被限流不回落，直接按分类报错。
+      responses:
+        "200":
+          description: 抓取结果（source = pricing / models）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  siteId:
+                    type: string
+                  source:
+                    type: string
+                    enum: [pricing, models]
+                  models:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RelayModelEntry"
+                  fetchedAt:
+                    type: string
+                    format: date-time
+        "404":
+          description: 站点不存在（`site not found`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  "/dsh-pet-7340/relays/focus":
+    post:
+      tags: [Relays]
+      operationId: setRelayFocus
+      summary: 设置/清除焦点站点
+      description: |
+        焦点站点 = 当前用于展示余额/健康的站点（存 `focus.json`，不进站点实体）。
+        **只影响展示口径，绝不做请求转发**（明确 Non-Goal）。空 `siteId` = 清除焦点
+        （回到全舰队汇总口径）。切换后立即重刷 `sections.relays` 状态叶。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                siteId:
+                  type: string
+                  description: "站点 id；空串/缺失 = 清除焦点"
+      responses:
+        "200":
+          description: 当前焦点站点 id（null = 无焦点）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  focusSiteId:
+                    type: [string, "null"]
+        "404":
+          description: 站点不存在（`site not found`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
 components:
   parameters:
+    RelaySiteId:
+      name: id
+      in: path
+      required: true
+      description: 站点 id（服务端 `randomUUID()` 生成）
+      schema:
+        type: string
+
     PetIdQuery:
       name: pet
       in: query
@@ -1019,7 +1415,7 @@ components:
         sections:
           type: object
           description: 全局段（所有端共享一份）
-          required: [balance, workStatus, notify]
+          required: [balance, workStatus, notify, relays]
           properties:
             balance:
               $ref: "#/components/schemas/BalanceLeaf"
@@ -1027,6 +1423,8 @@ components:
               $ref: "#/components/schemas/WorkStatusLeaf"
             notify:
               $ref: "#/components/schemas/NotifyLeaf"
+            relays:
+              $ref: "#/components/schemas/RelayLeaf"
         pets:
           type: object
           description: 每只宠物各自一份；键是宠物 id（**可含点号，勿切分**）
@@ -1591,3 +1989,333 @@ components:
               default: 300
               description: 周期碎碎念间隔
       additionalProperties: true
+
+    # ---------- 中转站（/relays 子域） ----------
+
+    RelayCredentialInput:
+      type: object
+      required: [kind]
+      description: |
+        凭证入参。`kind: 'manual'` 允许不带 `secret`（显式声明「无凭证、手工填余额」）。
+        引导顺序：API Key 优先（覆盖面最广）→ AccessToken（账户级）→ Cookie（高级逃生）→ manual。
+      properties:
+        kind:
+          type: string
+          enum: [access-token, api-key, session-cookie, manual]
+        secret:
+          type: string
+          description: 凭证值（绝不进任何响应体与日志）
+        extraHeaders:
+          type: object
+          description: 附加请求头（值同样视为敏感，脱敏后才可外泄）
+          additionalProperties:
+            type: string
+
+    RelaySiteInput:
+      type: object
+      required: [name, url, kind]
+      description: |
+        新建/更新站点的入参（`credential` 段可选，单独存储不进站点实体）。
+        换算率未显式确认时写默认值 500000 并标记未确认（`rateConfirmed: false`）。
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+          description: "Base URL（自动归一化：去尾斜杠、去 /v1 后缀）"
+        kind:
+          type: string
+          enum: [new-api, sub2api, openai-compat]
+        note:
+          type: string
+        quotaPerUnit:
+          type: number
+          description: "quota ↔ 金额换算率（默认 500000 quota = 1 USD，可按站覆盖）"
+        rateConfirmed:
+          type: boolean
+          description: 换算率是否已确认（未确认的站余额带 rateUnconfirmed、不参与告警）
+        lowThreshold:
+          type: string
+          description: 低余额阈值（金额，与 manualBalance.currency 同币种）
+        enabled:
+          type: boolean
+          description: 是否参与刷新与告警
+        manualBalance:
+          type: object
+          properties:
+            amount:
+              type: string
+            currency:
+              type: string
+        credential:
+          $ref: "#/components/schemas/RelayCredentialInput"
+
+    RelaySiteView:
+      type: object
+      description: 站点 + 脱敏后的凭证摘要（**唯一允许出现在 API 响应里的形状**）
+      required: [id, name, url, kind, quotaPerUnit, enabled, createdAt, updatedAt, credential]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+        kind:
+          type: string
+        note:
+          type: string
+        quotaPerUnit:
+          type: number
+        rateConfirmed:
+          type: boolean
+        lowThreshold:
+          type: string
+        enabled:
+          type: boolean
+        manualBalance:
+          type: object
+          properties:
+            amount:
+              type: string
+            currency:
+              type: string
+            updatedAt:
+              type: string
+              format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        credential:
+          type: object
+          required: [kind, masked, present]
+          properties:
+            kind:
+              type: string
+              enum: [access-token, api-key, session-cookie, manual]
+            masked:
+              type: string
+              description: "掩码预览（如 `sk-ab****wxyz`）；manual 时为空串"
+            present:
+              type: boolean
+            extraHeaders:
+              type: object
+              description: 脱敏后的附加请求头（键保留、值全掩）
+              additionalProperties:
+                type: string
+            lastValidatedAt:
+              type: string
+              format: date-time
+
+    RelayBalanceResult:
+      description: |
+        单站余额结果。**绝不伪造 0 余额**：查不到就是查不到，落对应 reason。
+        无限额度站（`unlimited_quota` 或 1e8 哨兵）的 `data.total` 是**已用金额**而非余额。
+      oneOf:
+        - type: object
+          required: [ok, siteId, provider, shape, source, data]
+          properties:
+            ok:
+              type: boolean
+              const: true
+            siteId:
+              type: string
+            provider:
+              type: string
+              description: "provider id（`relay:<kind>`），展示层据此区分来源"
+            shape:
+              type: string
+              const: money
+            source:
+              type: string
+              enum: [auto, manual]
+            scope:
+              type: string
+              enum: [account, token]
+              description: "account = 账户级（/api/user/self）；token = 令牌级（usage/token、billing）"
+            unlimited:
+              type: boolean
+            spent:
+              type: string
+              description: 已用金额（unlimited 时与 data.total 同值）
+            rateUnconfirmed:
+              type: boolean
+              description: 换算率未确认：客户端提示核对，且该站不参与低余额告警
+            data:
+              $ref: "#/components/schemas/BalanceView"
+        - type: object
+          required: [ok, siteId, provider, reason]
+          properties:
+            ok:
+              type: boolean
+              const: false
+            siteId:
+              type: string
+            provider:
+              type: string
+            reason:
+              type: string
+              description: |
+                `unsupported` 未登记的站点类型 / `credential-missing` 未配置凭证 /
+                `fetch-error` 抓取失败 / `manual` 降级路径（手工填写，带「手工」标签与时间）/
+                `blocked` 被 Cloudflare / 反代 / Bot Detection 拦 / `rate-limited` 站点 429
+                或失败退避中。
+              enum: [unsupported, credential-missing, fetch-error, manual, blocked, rate-limited]
+            message:
+              type: string
+
+    RelayHealthResult:
+      type: object
+      required: [siteId, health, checkedAt]
+      properties:
+        siteId:
+          type: string
+        health:
+          type: string
+          enum: [online, unreachable, auth-failed, blocked, unknown]
+        endpoint:
+          type: string
+        status:
+          type: integer
+        message:
+          type: string
+        latencyMs:
+          type: integer
+        checkedAt:
+          type: string
+          format: date-time
+
+    RelayDetectResult:
+      type: object
+      required: [kind, confidence, evidence]
+      properties:
+        kind:
+          type: string
+          enum: [new-api, sub2api, openai-compat, unknown]
+        confidence:
+          type: string
+          enum: [certain, likely, unknown]
+          description: "certain = 双信号命中；likely = 单信号；unknown = 无信号（引导手选，不静默失败）"
+        evidence:
+          type: array
+          description: 判定依据（人类可读，给 UI 展示「为什么判定成这个类型」）
+          items:
+            type: string
+        suggestedQuotaPerUnit:
+          type: number
+        displayInCurrency:
+          type: boolean
+        message:
+          type: string
+          description: 探测失败时的人类可读原因（kind = unknown 时）
+
+    RelayModelEntry:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+        ratio:
+          type: number
+          description: "模型倍率（model_ratio，按 token 计费的站；0 是合法值）"
+        price:
+          type: number
+          description: "模型固定价格（model_price，按次计费的站）"
+
+    RelayModelRow:
+      type: object
+      required: [id, sites]
+      properties:
+        id:
+          type: string
+        sites:
+          type: array
+          description: 覆盖全部站点的格子（按名称排序）
+          items:
+            type: object
+            required: [siteId, name, available]
+            properties:
+              siteId:
+                type: string
+              name:
+                type: string
+              available:
+                type: [boolean, "null"]
+                description: "true = 该站有这模型；false = 抓过且没有（明确不可用）；null = 未抓过（未知，绝不猜成没有）"
+              ratio:
+                type: number
+              price:
+                type: number
+
+    RelayFleetSummary:
+      type: object
+      description: |
+        舰队汇总（`sections.relays` 叶子的 summary 字段）。无限额度站**不计入**
+        total / siteCount（它们的「剩余」不可计），单列 `unlimitedCount`。
+      properties:
+        currency:
+          type: string
+        total:
+          type: string
+        fullBalance:
+          type: string
+        siteCount:
+          type: integer
+        unlimitedCount:
+          type: integer
+        failedCount:
+          type: integer
+        lowSites:
+          type: array
+          items:
+            type: object
+            properties:
+              siteId:
+                type: string
+              name:
+                type: string
+              amount:
+                type: string
+              currency:
+                type: string
+              threshold:
+                type: string
+        otherCurrencies:
+          type: array
+          description: 被排除的其他币种（多币种不混算，如实列出）
+          items:
+            type: string
+
+    RelayLeaf:
+      type: object
+      required: [counter, data]
+      description: |
+        `sections.relays` 状态叶。宿主有启用站点时每拍刷新（与 `sections.balance` 并存，
+        **绝不合流**）；没有启用站点时 `data` 保持 null。
+      properties:
+        counter:
+          $ref: "#/components/schemas/Counter"
+        data:
+          oneOf:
+            - type: object
+              properties:
+                focusSiteId:
+                  type: [string, "null"]
+                  description: 焦点站点（只影响展示口径，绝不做请求转发）
+                summary:
+                  $ref: "#/components/schemas/RelayFleetSummary"
+                sites:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/RelayBalanceResult"
+                health:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/RelayHealthResult"
+                refreshedAt:
+                  type: string
+                  format: date-time
+            - type: "null"

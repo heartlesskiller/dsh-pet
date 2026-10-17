@@ -168,17 +168,21 @@
 | 7 | **S0 单实例锁落地**：`instance-lock.ts`（`wx` 原子取锁 + PID 存活判定回收 stale）+ 删除端口顺延（被占即失败）；同 commit 修复主理人定位的 3 个在途缺陷；全量测试恢复到 757 例 1.8s 干净退出（此前 600s 跑不完） | `b88b6e7` |
 | 8 | **真站实测**：`docs/10-real-site-verification.md` —— new-api 真站 curl 一手证据 F1-F9（`/api/usage/token/` 升第一优先、unlimited 哨兵、负 available、分 vs quota、200-with-error、识别信号、CF 判定、quota_per_unit 可探测、pricing 带倍率） | 文档（`b520567` 提交） |
 | 9 | **T02 适配器真站化重构**（11-plan V1.1）：三级取数链路按凭证分流（api-key→usage/token→billing；AT→user/self→usage/token→billing，凭证类型间不降级）+ 四守卫 + CF/429 归类（`blocked`/`rate-limited`）+ `rateUnconfirmed` 落地（money.ts 拆除静默默认，store 建站显式写默认并标未确认）+ `scope/unlimited/spent` 字段 + `detect.ts` 识别纯函数；relays 测试 70→**117 全绿**，全量 **804/803/0/1skip**；**`/api/status` 活数据复测通过**（识别 new-api + 探测 500000） | 本轮 |
+| 10 | **T03 三端点 detect/models/focus**：`POST /relays/detect`（不落库，凭证只用于探测；失败回 unknown+原因）/ `GET /relays/models`（只读缓存聚合，三态矩阵：有/抓过没有/没抓过=null）/ `POST /relays/{id}/models`（优先 pricing 回落 v1/models）/ `POST /relays/focus`（焦点站点，只影响展示）+ `sections.relays` 叶带 `focusSiteId`；relays 117→134 | `8798b9e` |
+| 11 | **T04 客户端消费 sections.relays**：`shared/relays.ts`（readRelays/relaysBalanceState 折 money 喂六档动画/relaysBubbleRows/relaysAlertKey 去重）+ `client/relay-face.ts` 气泡工厂 + `pet.ts` 轮询分支（通配捕获，不为 relays 改 state.ts）+ mock-server 补 `/state` + `pnpm verify:relays` 沙箱验收脚本（renderToStaticMarkup 真实组件输出，EVIDENCE OK）；relays+shared 测试 134→150 | `425642a` |
+| 12 | **T05 openai-compat 适配器 + 退避**：billing 双端点兜底适配器（真站实测端点）+ 注册表 + 站点级失败指数退避（1s→2s→4s…60s 封顶，退避期不请求，成功即清）+ 舰队刷新 4s deadline（到点显式跳过）；relays 134→145 | `71236d7` |
+| 13 | **T08 文档契约同步**：`openapi.yaml` 补 `/relays` 10 路径 + 9 个 schema + `RelayLeaf`/`sections.relays`（check:openapi 从失败转为全过：24 路径/29 操作/110 ref）；`API.md` 第五节中转站管理 + 「数据直返」子域例外写明 + 修正「端口顺延」过时描述；`README.md` fork 致谢（合规）+ 中转站管理章节 + 凭证明文落盘显著提示；`package.json` `forkedFrom` | 本轮 |
 
-**累计新增单测：55（R1-R3）+ 47（S0/T02 轮）＝ 102 个，全部通过。**
+**累计新增单测：55（R1-R3）+ 47（S0/T02 轮）+ 51（T03/T04/T05 轮）＝ 153 个，全部通过。**
 
 ### 尚未闭环（如实记账，对照 11-plan-v1.1.md §5.2 待验证清单）
 
-1. ~~**new-api 适配器未对真实站点跑通过**~~ → **已闭环**（轮 8 真站实测 + 轮 9 按实测重构 + `/api/status` 活数据复测；`/api/usage/token/` 与 billing 链路有待验证项 V1/V2 见下）
-2. **V1** `/api/user/self` 账户级余额真实形状 —— 需要一个 **AccessToken**（本站只有 API Key）
-3. **V2** 有额度（非无限）Key 的 `hard_limit_usd − total_usage/100` 剩余公式 —— 需要一个**有额度的 Key**
-4. **V3** Cloudflare 真拦截响应形态 —— 需要被挑战过的站点（判定表已按修订 #23 实现，未实测）
-5. **`/relays/detect`、`/relays/models`、`/relays/focus` 三端点未接路由**（detect.ts 纯函数已就绪，T03）
-6. **`sections.relays` 客户端零消费**（T04：桌宠不显示中转站余额）
-7. **sub2api / openai-compat 适配器未写**（T05/T09；契约已声明，注册表返回 `unsupported`）
-8. **`API.md`/`openapi.yaml` 无 `/relays` 契约**（T08）
-9. **凭证明文落盘**：`relay-credentials.json` 明文（Q1 决策 V2 上 keytar/DPAPI；README 显著提示待 T08）
+1. **V1** `/api/user/self` 账户级余额真实形状 —— 需要一个 **AccessToken**（本站只有 API Key）
+2. **V2** 有额度（非无限）Key 的 `hard_limit_usd − total_usage/100` 剩余公式 —— 需要一个**有额度的 Key**
+3. **V3** Cloudflare 真拦截响应形态 —— 需要被挑战过的站点（判定表已按修订 #23 实现，未实测）
+4. **`sections.relays` 真机观感**（沙箱无 GUI）：用户桌面跑一次独立模式/浏览器 overlay 确认
+5. **T06 设置页管理 UI**（站点 CRUD + detect 引导 + focus 的图形界面；当前只能经 HTTP 端点管理）
+6. **T07 R0 网关续建**（S5 能力分级 / S7 三件套 / S8 SSE；与中转站链路解耦，可并行）
+7. **sub2api 适配器**（T09：契约二手，等用户提供站点再写，避免造无法验证的代码）
+8. **凭证明文落盘**：`relay-credentials.json` 明文（README 已显著提示；DPAPI/keytar 在路线图）
+9. **VoAPI jwt kind**（T12：JWT 获取路径未找到任何公开资料，资料不到就维持 manual 降级）

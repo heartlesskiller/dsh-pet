@@ -48,14 +48,52 @@ dsh-pet 的宿主半侧向 DSH 自己的 Web 服务注册了**一条前缀路由
 
 ---
 
+## 五、中转站管理（`/relays`）
+
+管理多个 LLM API 中转站的资产：余额 / 健康状态 / 模型清单 / 焦点站点。**本子域是「数据直返」
+例外**——动作类端点直接返回结果数据而不是 `{ ok }`（agent 一次调用就要拿到结果）；
+该例外**只限 `/relays` 子域**，不扩散到 `/balance`、`/whisper` 等既有端点。
+
+| 接口 | 功能 |
+| --- | --- |
+| `GET /relays` | 全部站点脱敏视图（`credential.masked`，**绝不明文**） |
+| `POST /relays` | 新建站点（body = 站点字段 + 可选 `credential`） |
+| `PUT /relays/{id}` | 更新站点（可同时更新/清除凭证） |
+| `DELETE /relays/{id}` | 删站点并删凭证（不留孤儿密钥） |
+| `POST /relays/refresh-all` | 并发刷新全部启用站点 → 各站结果数组 |
+| `POST /relays/{id}/refresh` | 刷新该站余额 → `RelayBalanceResult` |
+| `POST /relays/{id}/health` | 连通性探测 → `RelayHealthResult` |
+| `POST /relays/{id}/manual-balance` | 设置/清除手工余额（空 `amount` = 清除） |
+| `POST /relays/detect` | 站点类型识别（**不落库**；body = `{url, credential?}`） |
+| `GET /relays/models` | 模型清单矩阵（只读缓存聚合，不外发抓取） |
+| `POST /relays/{id}/models` | 实时抓取该站模型清单并写缓存 |
+| `POST /relays/focus` | 设置/清除焦点站点（body = `{siteId}`，空 = 清除） |
+
+几个要知道的点：
+
+- **凭证明文零外泄**：站点与凭证分文件存储（`relays.json` 无任何密钥字段，
+  `relay-credentials.json` 只放密钥）；每个响应体返回前过脱敏自检，**检出明文凭证该请求
+  直接失败**——宁可端点坏掉，不泄露。
+- **余额结果六种 reason**：`unsupported` / `credential-missing` / `fetch-error` /
+  `manual`（降级路径：手工填写，带「手工」标签与填写时间）/ `blocked`（被 Cloudflare /
+  反代 / Bot Detection 拦）/ `rate-limited`（站点 429 或失败退避中）。**绝不伪造 0 余额。**
+- **无限额度**：`unlimited_quota` 或 `hard_limit_usd >= 1e8` 哨兵站显示「无限额度 ·
+  已用 $X」，不参与低余额告警、不计入舰队合计。
+- **换算率**：默认 500000 quota = $1，可按站覆盖；探测不到会标 `rateUnconfirmed`
+  （客户端提示核对，未确认站不告警）——**绝不静默默认**。
+- **错误口径**：结构性参数错误（坏 JSON / 缺字段 / 站点不存在）→ 4xx + `{ error }`；
+  业务失败 → HTTP 200 + `{ ok: false, reason }`（与 `/whisper` 同形）。
+
 ## 三条要记住的约定
 
 1. **数据只有一个出口**：`GET /state`。它返回宿主内存里的已发布状态，每个状态位是
    `{ counter, data }`。
 2. **动作端点不返回数据**：上表第二节与第三节的 `POST` 只回 `{ ok: true }`，表示"动作做完了"；
    结果写进状态，调用方随后拉一拍 `/state` 即可看到（立刻补拉就是 0 延迟，不必等下一个轮询周期）。
+   **唯一例外是 `/relays` 子域**（见第五节）：它的动作端点直接返回结果数据——那是机器接口
+   子域的明确契约决策，**不许扩散**到其他端点。
 3. **`counter` 变了才渲染**：它是 `Date.now()` 且严格递增，宿主重启也不会倒退。
-   状态位的路径（如 `sections.balance`、`pets.<id>.say`）请当作**不透明键**使用——
+   状态位的路径（如 `sections.balance`、`sections.relays`、`pets.<id>.say`）请当作**不透明键**使用——
    宠物 id 允许含点号，**不要按 `.` 切分**。
 
 ## 快速试一下
@@ -77,6 +115,12 @@ curl -s $BASE/state   # → pets.main.say.data.text
 curl -s -X POST "$BASE/anim?pet=main" \
      -H 'content-type: application/json' \
      -d '{"name":"东张西望"}'
+
+# 中转站：识别一个站点的类型（不落库；带 API Key 时识别更准）
+curl -s -X POST "$BASE/relays/detect" \
+     -H 'content-type: application/json' \
+     -d '{"url":"https://你的中转站"}'
+# → { ok: true, detect: { kind: "new-api", confidence: "likely", evidence: [...], suggestedQuotaPerUnit: 500000 } }
 ```
 
 ## 独立模式（不打开 DSH）
@@ -85,7 +129,7 @@ curl -s -X POST "$BASE/anim?pet=main" \
 用法见 [`dsh-pet/README.md`](dsh-pet/README.md) 的「🧍 独立运行（完全不打开 DSH）」）：
 
 ```bash
-BASE=http://127.0.0.1:3080/dsh-pet-7340   # 独立模式默认端口 3080（被占用则顺延）
+BASE=http://127.0.0.1:3080/dsh-pet-7340   # 独立模式默认端口 3080（被占用会明确失败：独立模式只跑一个实例）
 ```
 
 **上表所有端点与约定在这里完全不变** —— 独立模式把插件的宿主半边跑在伪 ctx 上，
@@ -102,6 +146,9 @@ BASE=http://127.0.0.1:3080/dsh-pet-7340   # 独立模式默认端口 3080（被�
 依赖 DSH 的能力在独立模式下**明确降级**（结构化失败，不假装成功）：`POST /whisper`、`POST /chat`
 回 `{ ok: false, reason: 'provider-missing' }`（没有模型服务），`POST /balance` 回
 `{ ok: false, reason: 'unsupported' }`，`GET /state` 的各状态位保持空闲初始值。
+
+**中转站管理（`/relays`）不依赖 DSH**：它是本项目自己的功能，独立模式下全套可用——
+这正是「不打开 DSH 也能当中转站看板用」的底气。
 
 ## 相关
 

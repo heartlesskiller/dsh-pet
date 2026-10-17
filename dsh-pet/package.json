@@ -15,6 +15,7 @@
     "react"
   ],
   "homepage": "https://github.com/PC2005-cloud/dsh-pet#readme",
+  "forkedFrom": "https://github.com/PC2005-cloud/dsh-pet",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PC2005-cloud/dsh-pet.git"
