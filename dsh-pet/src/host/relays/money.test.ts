@@ -3,9 +3,9 @@ import { test } from 'node:test';
 
 import {
   DEFAULT_QUOTA_PER_UNIT,
+  detectQuotaPerUnit,
   quotaToAmount,
   quotaPerUnitOf,
-  siteQuotaPerUnit,
   sumQuota,
   usedPercent,
 } from './money.ts';
@@ -57,13 +57,32 @@ test('quotaPerUnitOf：有限正数原样返回', () => {
   assert.throws(() => quotaPerUnitOf(0));
 });
 
-test('siteQuotaPerUnit：站点没配 → 默认值（不是错误）；配了非法值 → throw', () => {
-  assert.equal(siteQuotaPerUnit(undefined), DEFAULT_QUOTA_PER_UNIT);
-  assert.equal(siteQuotaPerUnit(null), DEFAULT_QUOTA_PER_UNIT);
-  assert.equal(siteQuotaPerUnit(''), DEFAULT_QUOTA_PER_UNIT);
-  assert.equal(siteQuotaPerUnit(250_000), 250_000);
-  assert.throws(() => siteQuotaPerUnit(0));
-  assert.throws(() => siteQuotaPerUnit(-1));
+test('quotaPerUnitOf：绝不静默默认 —— 缺省值一律 throw（修订 #11）', () => {
+  // 「站点没配就用默认」的兜底入口已拆除：调用方必须显式给值，
+  // 建站时由 store 显式写默认值并标记 rateConfirmed:false
+  assert.throws(() => quotaPerUnitOf(undefined), /非法/);
+  assert.throws(() => quotaPerUnitOf(null), /非法/);
+  assert.throws(() => quotaPerUnitOf(''), /非法/);
+  assert.equal(quotaPerUnitOf(250_000), 250_000);
+  assert.throws(() => quotaPerUnitOf(0));
+  assert.throws(() => quotaPerUnitOf(-1));
+});
+
+test('detectQuotaPerUnit：从 /api/status 探测换算率（修订 #19，探测是第一路径）', () => {
+  // 真站响应形状（docs/10 §1）：data.quota_per_unit = 500000
+  assert.equal(detectQuotaPerUnit({ data: { quota_per_unit: 500000 } }), 500_000);
+  assert.equal(detectQuotaPerUnit({ data: { quota_per_unit: 250000 } }), 250_000);
+  // 兼容没有 data 包裹、直接平铺的返回
+  assert.equal(detectQuotaPerUnit({ quota_per_unit: 500000 }), 500_000);
+});
+
+test('detectQuotaPerUnit：探测不到 → undefined（调用方标 rateUnconfirmed，不静默默认）', () => {
+  assert.equal(detectQuotaPerUnit({ data: {} }), undefined);
+  assert.equal(detectQuotaPerUnit({ data: { quota_per_unit: 0 } }), undefined);
+  assert.equal(detectQuotaPerUnit({ data: { quota_per_unit: 'x' } }), undefined);
+  assert.equal(detectQuotaPerUnit({}), undefined);
+  assert.equal(detectQuotaPerUnit(null), undefined);
+  assert.equal(detectQuotaPerUnit('not-json'), undefined);
 });
 
 test('sumQuota：剩余 + 已用 = 历史总额', () => {

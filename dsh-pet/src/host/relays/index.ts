@@ -38,6 +38,17 @@ function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * fetch 层错误 → 结构化 reason（A6： blocked / rate-limited 与 fetch-error 文案必须区分）。
+ * 判定依据 provider 抛错时带的 `code`（见 providers/newapi.ts 的 classifiedError）。
+ */
+function classifyBalanceError(e: unknown): 'blocked' | 'rate-limited' | 'fetch-error' {
+  const code = (e as { code?: unknown }).code;
+  if (code === 'blocked') return 'blocked';
+  if (code === 'rate-limited') return 'rate-limited';
+  return 'fetch-error';
+}
+
 /** 手工填写结果（降级路径，不是失败；必须带「手工」来源与填写时间） */
 function manualResult(site: RelaySite, note: string): RelayBalanceResult {
   if (!site.manualBalance) {
@@ -94,11 +105,14 @@ export async function querySiteBalance(dir: string, site: RelaySite): Promise<Re
       extraHeaders: cred.extraHeaders,
       quotaPerUnit: site.quotaPerUnit,
     });
+    // 换算率未确认（建站默认 / 探测失败，修订 #11）→ 打标：客户端提示核对，
+    // 且该站不参与低余额告警（OP-6：数据不可靠不评估）
+    if (site.rateConfirmed !== true) return { ...r, siteId: site.id, rateUnconfirmed: true };
     return { ...r, siteId: site.id };
   } catch (e) {
     const msg = errMessage(e);
     if (site.manualBalance) return manualResult(site, '自动查询失败（' + msg + '），使用手工填写值');
-    return { ok: false, siteId: site.id, provider: pid, reason: 'fetch-error', message: msg };
+    return { ok: false, siteId: site.id, provider: pid, reason: classifyBalanceError(e), message: msg };
   }
 }
 
@@ -180,6 +194,8 @@ export interface RelayLowSite {
  * - 阈值取站点自己的 `lowThreshold`，缺省用 `defaultThreshold`；**两个都没有就不判**——
  *   不替用户猜一个阈值；
  * - 只对 `source: 'auto'` 的成功结果判定。手工值是用户上次手填的快照，拿它触发告警会误报；
+ * - **无限额度站不判定**（F2/A4：它没有「剩余」概念，`total` 是已用金额，拿它比阈值会误报）；
+ * - **换算率未确认的站不判定**（OP-6：数据不可靠不评估，先提示用户核对）；
  * - 无法解析的金额 → 跳过该站点（不猜）。
  */
 export function selectLowSites(
@@ -194,6 +210,8 @@ export function selectLowSites(
     const site = byId.get(r.siteId);
     if (!site) continue;
     if (r.source === 'manual') continue;
+    if (r.unlimited === true) continue;
+    if (r.rateUnconfirmed === true) continue;
     const threshold = site.lowThreshold ?? defaultThreshold;
     if (!threshold) continue;
     const amount = Number(r.data.total);
@@ -216,11 +234,11 @@ export function selectLowSites(
 /** 全舰队汇总（纯函数） */
 export interface RelayFleetSummary {
   currency: string;
-  /** 该币种下全部可查站点的剩余合计 */
+  /** 该币种下全部可查站点（**不含无限额度站**）的剩余合计 */
   total: string;
   /** 历史总额合计 —— 仅当参与站点**全部**提供 fullBalance 时才有（否则不猜基准） */
   fullBalance?: string;
-  /** 可查站点数 */
+  /** 可查站点数（不含无限额度站） */
   siteCount: number;
   /** 低于阈值的站点（按剩余升序） */
   lowSites: RelayLowSite[];
@@ -228,6 +246,11 @@ export interface RelayFleetSummary {
   otherCurrencies: string[];
   /** 查不到 / 未配置凭证的站点数 */
   failedCount: number;
+  /**
+   * 无限额度站数量（F2：它们的 `total` 是已用金额，语义相反，
+   * **不计入上面的剩余合计**；客户端据此显示「N 站无限额度」）。
+   */
+  unlimitedCount: number;
 }
 
 /**
@@ -235,6 +258,9 @@ export interface RelayFleetSummary {
  *
  * 币种处理：**只合并同币种**。多币种时取「可查站点数最多」的币种作主口径，其余进
  * `otherCurrencies` 如实列出 —— 把 USD 和 CNY 相加是没有意义的数字，宁可不给。
+ *
+ * 无限额度站：不计入 total / fullBalance / siteCount（它们的「剩余」不可计），
+ * 只进 `unlimitedCount` —— 把已用金额加进「剩余合计」是把语义搞反的数字。
  */
 export function aggregateBalances(
   sites: RelaySite[],
@@ -243,10 +269,12 @@ export function aggregateBalances(
 ): RelayFleetSummary {
   const ok = results.filter((r): r is Extract<RelayBalanceResult, { ok: true }> => r.ok);
   const failedCount = results.length - ok.length;
+  const countable = ok.filter((r) => r.unlimited !== true);
+  const unlimitedCount = ok.length - countable.length;
 
-  // 按币种分组
-  const groups = new Map<string, typeof ok>();
-  for (const r of ok) {
+  // 按币种分组（只对可计入「剩余」的站）
+  const groups = new Map<string, typeof countable>();
+  for (const r of countable) {
     const c = r.data.currency || 'USD';
     const list = groups.get(c);
     if (list) list.push(r);
@@ -273,5 +301,6 @@ export function aggregateBalances(
     lowSites: selectLowSites(sites, results, defaultThreshold),
     otherCurrencies: currencies.slice(1),
     failedCount,
+    unlimitedCount,
   };
 }

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import {
+  RELAY_PROVIDERS,
   aggregateBalances,
   matchRelayProvider,
   queryAllBalances,
@@ -13,7 +14,8 @@ import {
   supportedKinds,
 } from './index.ts';
 import { putCredential, upsertSite } from './store.ts';
-import type { RelayBalanceResult, RelaySite } from './types.ts';
+import { classifiedError } from './providers/newapi.ts';
+import type { RelayBalanceResult, RelayProvider, RelaySite } from './types.ts';
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), 'relay-idx-'));
@@ -183,4 +185,169 @@ test('aggregateBalances：空输入不炸', () => {
   assert.equal(sum.siteCount, 0);
   assert.equal(sum.total, '0.00');
   assert.deepEqual(sum.lowSites, []);
+  assert.equal(sum.unlimitedCount, 0);
+});
+
+// ---------- T02 新增：无限额度 / 换算率未确认 / 错误归类 ----------
+
+/** 带 unlimited / rateUnconfirmed 标记的成功结果 */
+function okResultExt(
+  siteId: string,
+  total: string,
+  ext: { unlimited?: boolean; spent?: string; rateUnconfirmed?: boolean; scope?: 'account' | 'token' } = {},
+): RelayBalanceResult {
+  return {
+    ok: true, siteId, provider: 'relay:new-api', shape: 'money', source: 'auto',
+    ...(ext.scope !== undefined ? { scope: ext.scope } : {}),
+    ...(ext.unlimited !== undefined ? { unlimited: ext.unlimited } : {}),
+    ...(ext.spent !== undefined ? { spent: ext.spent } : {}),
+    ...(ext.rateUnconfirmed !== undefined ? { rateUnconfirmed: ext.rateUnconfirmed } : {}),
+    data: { currency: 'USD', total, granted: total, toppedUp: '0.00' },
+  };
+}
+
+test('selectLowSites：F2 —— 无限额度站不参与低余额告警（它的 total 是已用金额）', () => {
+  const dir = tmp();
+  const a = mkSite(dir, { name: 'a', lowThreshold: '5' });
+  const b = mkSite(dir, { name: 'b', lowThreshold: '5' });
+  const picked = selectLowSites(
+    [a, b],
+    [okResultExt(a.id, '34.58', { unlimited: true, spent: '34.58' }), okResultExt(b.id, '3.02')],
+  );
+  assert.deepEqual(picked.map((p) => p.name), ['b'], '无限站没有「剩余」概念，拿它比阈值会误报');
+});
+
+test('selectLowSites：OP-6 —— 换算率未确认的站不告警（数据不可靠不评估）', () => {
+  const dir = tmp();
+  const a = mkSite(dir, { name: 'a', lowThreshold: '5' });
+  const b = mkSite(dir, { name: 'b', lowThreshold: '5' });
+  const picked = selectLowSites(
+    [a, b],
+    [okResultExt(a.id, '1.00', { rateUnconfirmed: true }), okResultExt(b.id, '3.02')],
+  );
+  assert.deepEqual(picked.map((p) => p.name), ['b'], '未确认换算率先提示核对，不拿来告警');
+});
+
+test('aggregateBalances：无限额度站不计入剩余合计，只进 unlimitedCount（A4）', () => {
+  const dir = tmp();
+  const a = mkSite(dir, { name: 'a' });
+  const b = mkSite(dir, { name: 'b' });
+  const sum = aggregateBalances(
+    [a, b],
+    [okResult(a.id, '10.00', 'USD', '20.00'), okResultExt(b.id, '34.58', { unlimited: true, spent: '34.58' })],
+  );
+  assert.equal(sum.total, '10.00', '已用金额加进「剩余合计」是把语义搞反');
+  assert.equal(sum.siteCount, 1, '无限站不计入可查站点数');
+  assert.equal(sum.unlimitedCount, 1);
+  assert.equal(sum.fullBalance, '20.00');
+  assert.equal(sum.failedCount, 0, '无限站是查询成功，不是失败');
+});
+
+test('aggregateBalances：全部无限 → siteCount 0 但 unlimitedCount 如实（不伪造 0 余额）', () => {
+  const dir = tmp();
+  const a = mkSite(dir, { name: 'a' });
+  const sum = aggregateBalances([a], [okResultExt(a.id, '34.58', { unlimited: true, spent: '34.58' })]);
+  assert.equal(sum.siteCount, 0);
+  assert.equal(sum.total, '0.00');
+  assert.equal(sum.unlimitedCount, 1);
+});
+
+/** 临时把注册表第一个 provider 换成假实现（跑完还原；不碰网络） */
+async function withFakeProvider<T>(fetchImpl: () => Promise<Omit<RelayBalanceResult, 'siteId'> | never>, run: () => Promise<T>): Promise<T> {
+  const fake: RelayProvider = {
+    kinds: ['new-api'],
+    credentialKinds: ['api-key'],
+    fetch: async () => (await fetchImpl()) as never,
+  };
+  const original = RELAY_PROVIDERS[0];
+  RELAY_PROVIDERS[0] = fake;
+  try {
+    return await run();
+  } finally {
+    RELAY_PROVIDERS[0] = original;
+  }
+}
+
+test('querySiteBalance：修订 #11 —— rateConfirmed 未确认 → 成功结果带 rateUnconfirmed', async () => {
+  const dir = tmp();
+  const s = mkSite(dir); // 建站默认 rateConfirmed:false（store 显式写默认换算率）
+  putCredential(dir, s.id, { kind: 'api-key', secret: 'sk-test' });
+  await withFakeProvider(
+    async () => ({ ok: true, provider: 'relay:new-api', shape: 'money', source: 'auto', data: { currency: 'USD', total: '1.00', granted: '1.00', toppedUp: '0.00' } }),
+    async () => {
+      const r = await querySiteBalance(dir, s);
+      assert.equal(r.ok, true);
+      if (!r.ok) return;
+      assert.equal(r.rateUnconfirmed, true, '未确认换算率必须打标');
+    },
+  );
+  // 显式确认后 → 不带标记
+  const confirmed = upsertSite(dir, { id: s.id, name: s.name, url: s.url, kind: 'new-api', rateConfirmed: true });
+  await withFakeProvider(
+    async () => ({ ok: true, provider: 'relay:new-api', shape: 'money', source: 'auto', data: { currency: 'USD', total: '1.00', granted: '1.00', toppedUp: '0.00' } }),
+    async () => {
+      const r = await querySiteBalance(dir, confirmed);
+      assert.equal(r.ok, true);
+      if (!r.ok) return;
+      assert.ok(!('rateUnconfirmed' in r), '已确认就不该有标记键');
+    },
+  );
+});
+
+test('querySiteBalance：A6 —— provider 抛 blocked / rate-limited → 归类为对应 reason', async () => {
+  const dir = tmp();
+  const s = mkSite(dir);
+  putCredential(dir, s.id, { kind: 'api-key', secret: 'sk-test' });
+  await withFakeProvider(
+    async () => {
+      throw classifiedError('relays: HTTP 403 疑似 Cloudflare 拦截', 'blocked', 403);
+    },
+    async () => {
+      const r = await querySiteBalance(dir, s);
+      assert.equal(r.ok, false);
+      if (r.ok) return;
+      assert.equal(r.reason, 'blocked');
+      assert.match(r.message ?? '', /Cloudflare/);
+    },
+  );
+  await withFakeProvider(
+    async () => {
+      throw classifiedError('relays: HTTP 429 站点限流', 'rate-limited', 429);
+    },
+    async () => {
+      const r = await querySiteBalance(dir, s);
+      assert.equal(r.ok, false);
+      if (r.ok) return;
+      assert.equal(r.reason, 'rate-limited');
+    },
+  );
+  await withFakeProvider(
+    async () => {
+      throw new Error('plain failure');
+    },
+    async () => {
+      const r = await querySiteBalance(dir, s);
+      assert.equal(r.ok, false);
+      if (r.ok) return;
+      assert.equal(r.reason, 'fetch-error', '无分类 code 的普通错误归 fetch-error');
+    },
+  );
+});
+
+test('querySiteBalance：自动失败 + 有手工值 → 用手工值（message 说明原因，不冒充实时）', async () => {
+  const dir = tmp();
+  const s = mkSite(dir, { manualBalance: { amount: '3.02', currency: 'USD' } });
+  putCredential(dir, s.id, { kind: 'api-key', secret: 'sk-test' });
+  await withFakeProvider(
+    async () => {
+      throw classifiedError('relays: HTTP 429 站点限流', 'rate-limited', 429);
+    },
+    async () => {
+      const r = await querySiteBalance(dir, s);
+      assert.equal(r.ok, true);
+      if (!r.ok) return;
+      assert.equal(r.source, 'manual');
+      assert.equal(r.data.total, '3.02');
+    },
+  );
 });

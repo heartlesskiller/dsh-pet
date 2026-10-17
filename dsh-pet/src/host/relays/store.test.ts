@@ -42,7 +42,8 @@ test('upsertSite：新建 + 读回往返，URL 归一化（去 /v1 与尾斜杠�
   const s = seed(dir);
   assert.ok(s.id.length > 0, '必须生成 id');
   assert.equal(s.url, 'https://a.example.com');
-  assert.equal(s.quotaPerUnit, 500_000, '没配换算率就用默认');
+  assert.equal(s.quotaPerUnit, 500_000, '没配换算率就显式写默认值');
+  assert.equal(s.rateConfirmed, false, '修订 #11：建站即标记「换算率未确认」，绝不静默默认');
   assert.equal(s.enabled, true);
 
   const back = loadSites(dir);
@@ -58,7 +59,23 @@ test('upsertSite：同 id 更新，保留 createdAt；不同字段可分别改',
   assert.equal(u.createdAt, s.createdAt, 'createdAt 必须保留');
   assert.equal(u.name, '改名了');
   assert.equal(u.quotaPerUnit, 250_000);
+  assert.equal(u.rateConfirmed, false, '换算率改了但没确认 → 仍未确认（要重新核对）');
   assert.equal(loadSites(dir).length, 1, '不能更新出第二条');
+});
+
+test('upsertSite：修订 #11 —— 换算率确认状态可显式写入与更新（不传则保留原值）', () => {
+  const dir = tmp();
+  const s = seed(dir);
+  assert.equal(s.rateConfirmed, false);
+  // 显式确认（探测到 quota_per_unit 或用户核对过）
+  const confirmed = upsertSite(dir, { id: s.id, name: s.name, url: s.url, kind: 'new-api', rateConfirmed: true });
+  assert.equal(confirmed.rateConfirmed, true);
+  // 更新别的字段时不动确认状态
+  const renamed = upsertSite(dir, { id: s.id, name: 'X', url: s.url, kind: 'new-api' });
+  assert.equal(renamed.rateConfirmed, true, '没传就保留原值');
+  // 也可以显式改回未确认
+  const back = upsertSite(dir, { id: s.id, name: 'X', url: s.url, kind: 'new-api', rateConfirmed: false });
+  assert.equal(back.rateConfirmed, false);
 });
 
 test('validateSiteInput：非法入参一律 throw，不落脏数据', () => {
@@ -67,6 +84,7 @@ test('validateSiteInput：非法入参一律 throw，不落脏数据', () => {
   assert.throws(() => validateSiteInput({ name: 'x', url: 'a.com', kind: 'new-api' }), /http/);
   assert.throws(() => validateSiteInput({ name: 'x', url: 'https://a.com', kind: 'new-api', quotaPerUnit: 0 }), /quotaPerUnit/);
   assert.throws(() => validateSiteInput({ name: 'x', url: 'https://a.com', kind: 'new-api', quotaPerUnit: -1 }), /quotaPerUnit/);
+  assert.throws(() => validateSiteInput({ name: 'x', url: 'https://a.com', kind: 'new-api', rateConfirmed: 'yes' as never }), /rateConfirmed/);
   // 站点文件确实没被写坏
   const dir = tmp();
   assert.throws(() => upsertSite(dir, { name: '', url: 'https://a.com', kind: 'new-api' }));

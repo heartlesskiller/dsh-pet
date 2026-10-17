@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { siteQuotaPerUnit } from './money';
+import { DEFAULT_QUOTA_PER_UNIT, quotaPerUnitOf } from './money';
 import { maskHeaders, maskSecret } from './redact';
 import { normalizeBaseUrl } from './providers/newapi';
 import { RELAY_KINDS, type RelayCredential, type RelayCredentialKind, type RelayKind, type RelaySite, type RelaySiteView } from './types';
@@ -47,6 +47,11 @@ export interface SiteInput {
   kind: RelayKind;
   note?: string;
   quotaPerUnit?: number;
+  /**
+   * 换算率是否已确认。建站不传 → `false`（配合显式写入的默认值 500000，修订 #11：
+   * 未确认站点余额带 rateUnconfirmed 标记、不参与告警，绝不静默默认）。
+   */
+  rateConfirmed?: boolean;
   lowThreshold?: string;
   enabled?: boolean;
   manualBalance?: { amount: string; currency: string };
@@ -116,7 +121,10 @@ export function validateSiteInput(input: SiteInput): void {
   }
   // URL 归一化本身会校验协议与空值
   normalizeBaseUrl(input.url);
-  if (input.quotaPerUnit !== undefined) siteQuotaPerUnit(input.quotaPerUnit);
+  if (input.quotaPerUnit !== undefined) quotaPerUnitOf(input.quotaPerUnit);
+  if (input.rateConfirmed !== undefined && typeof input.rateConfirmed !== 'boolean') {
+    throw new Error('relays: rateConfirmed 必须是布尔值');
+  }
 }
 
 /**
@@ -141,6 +149,7 @@ export function upsertSite(dir: string, input: SiteInput): RelaySite {
       url,
       kind: input.kind,
       quotaPerUnit: input.quotaPerUnit ?? prev.quotaPerUnit,
+      rateConfirmed: input.rateConfirmed ?? prev.rateConfirmed,
       lowThreshold: input.lowThreshold ?? prev.lowThreshold,
       enabled: input.enabled ?? prev.enabled,
       updatedAt: now,
@@ -158,7 +167,10 @@ export function upsertSite(dir: string, input: SiteInput): RelaySite {
     name: input.name.trim(),
     url,
     kind: input.kind,
-    quotaPerUnit: input.quotaPerUnit ?? siteQuotaPerUnit(undefined),
+    // 建站显式写默认换算率并标记「未确认」（修订 #11）：探测/核对前，
+    // 余额带 rateUnconfirmed、不参与告警 —— 绝不静默默认 500000。
+    quotaPerUnit: input.quotaPerUnit ?? DEFAULT_QUOTA_PER_UNIT,
+    rateConfirmed: input.rateConfirmed ?? false,
     enabled: input.enabled ?? true,
     createdAt: now,
     updatedAt: now,

@@ -6,7 +6,10 @@
  *
  * - 所有 quota ↔ 金额的换算**只准在这里做**。provider、store、路由、前端都不许自己除；
  * - 换算率允许按站点覆盖（站点自己那份 `quotaPerUnit`），默认值集中在这里；
- * - 非法输入一律 `throw`，绝不静默当 0 —— 与上游 `balance/internal.ts` 同口径。
+ * - 非法输入一律 `throw`，绝不静默当 0 —— 与上游 `balance/internal.ts` 同口径；
+ * - **不提供「无标记兜底」入口**（修订 #11）：站点没确认换算率时，由 store 建站显式写
+ *   默认值并标记 `rateConfirmed:false`，余额结果带 `rateUnconfirmed` —— 探测不到就
+ *   要求用户确认，绝不静默默认 500000。探测入口见 {@link detectQuotaPerUnit}。
  */
 
 /** one-api / new-api 的默认换算率：500000 quota = 1 USD */
@@ -15,9 +18,18 @@ export const DEFAULT_QUOTA_PER_UNIT = 500_000;
 /** 默认币种。中转站几乎都以美元计费；CNY 站由站点数据自带，这里只做兜底 */
 export const DEFAULT_RELAY_CURRENCY = 'USD';
 
+/** 宽松取对象（数组 / null / 非对象 → undefined） */
+function asObj(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 /**
  * 校验换算率：必须是有限正数，否则 throw。
  * 站点配了 0 / 负数 / NaN 会让所有余额算成 Infinity 或 NaN —— 必须显式炸，不能静默。
+ * **缺省（undefined/null/''）同样 throw**：调用方必须显式给值（store 建站时给默认值
+ * 并标记未确认），本模块不替调用方猜（修订 #11）。
  */
 export function quotaPerUnitOf(value: unknown): number {
   const n = Number(value);
@@ -27,10 +39,19 @@ export function quotaPerUnitOf(value: unknown): number {
   return n;
 }
 
-/** 站点级换算率：缺省 / 非法 → 默认值（站点没配就用默认，不是错误） */
-export function siteQuotaPerUnit(value: unknown): number {
-  if (value === undefined || value === null || value === '') return DEFAULT_QUOTA_PER_UNIT;
-  return quotaPerUnitOf(value);
+/**
+ * 从 `/api/status` 响应探测站点换算率（`data.quota_per_unit`）。
+ *
+ * 探测是本该走通的第一路径（修订 #19：官方文档明标该端点鉴权要求「公开」）；
+ * 探测不到返回 undefined，由调用方标记 `rateUnconfirmed` 并要求用户确认 ——
+ * **绝不静默默认**（修订 #11）。
+ */
+export function detectQuotaPerUnit(body: unknown): number | undefined {
+  const root = asObj(body);
+  const data = asObj(root?.data) ?? root;
+  const v = data?.quota_per_unit;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 /**

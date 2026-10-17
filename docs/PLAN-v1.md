@@ -163,13 +163,22 @@
 | 2 | **R2a 持久化与脱敏**：`store.ts`（站点/凭证分文件、原子写、损坏文件改名 `.corrupt-*` 留存后抛错、可选字段条件展开）、`redact.ts`（`maskSecret`/`maskHeaders`/`containsSecret` 唯一脱敏出口） | `304d87c` |
 | 3 | **R2b 查询编排**：`index.ts`（注册表、`querySiteBalance` 完整降级链、`checkSiteHealth` 401/403→auth-failed、`queryAllBalances` 信号量并发 4、`selectLowSites` 阈值不猜/手工值不告警、`aggregateBalances` 多币种不混算） | `8f58db0` |
 | 4 | **质量清零**：`RelaySiteView.extraHeaders` 类型补齐、错误链 `cause`、typecheck/lint/build 全过；装齐依赖后**全量 `pnpm test` 718 个 717 过 0 失败**（此前 4 个失败经上游基线 worktree 对照确认是缺依赖，非回归） | `e73286b` |
+| 5 | **R3 宿主侧接入**：`/relays` 8 端点进 `handleRelayRoute` + `sections.relays` 状态叶 + `refreshRelays` 挂周期刷新（与单服务商链路并存不合流） | `2e7aecb` |
+| 6 | **计划修订**：纳入架构师 v2.1 裁决（不实现 ACP 线上协议，三轨摄入）与 PM 接口一手证据（修订 #18-#23）；补工程纪律 E1-E4 | `efe0c8a`/`da3afdf`/`52e270b`/`2cb1e30` |
+| 7 | **S0 单实例锁落地**：`instance-lock.ts`（`wx` 原子取锁 + PID 存活判定回收 stale）+ 删除端口顺延（被占即失败）；同 commit 修复主理人定位的 3 个在途缺陷；全量测试恢复到 757 例 1.8s 干净退出（此前 600s 跑不完） | `b88b6e7` |
+| 8 | **真站实测**：`docs/10-real-site-verification.md` —— new-api 真站 curl 一手证据 F1-F9（`/api/usage/token/` 升第一优先、unlimited 哨兵、负 available、分 vs quota、200-with-error、识别信号、CF 判定、quota_per_unit 可探测、pricing 带倍率） | 文档（`b520567` 提交） |
+| 9 | **T02 适配器真站化重构**（11-plan V1.1）：三级取数链路按凭证分流（api-key→usage/token→billing；AT→user/self→usage/token→billing，凭证类型间不降级）+ 四守卫 + CF/429 归类（`blocked`/`rate-limited`）+ `rateUnconfirmed` 落地（money.ts 拆除静默默认，store 建站显式写默认并标未确认）+ `scope/unlimited/spent` 字段 + `detect.ts` 识别纯函数；relays 测试 70→**117 全绿**，全量 **804/803/0/1skip**；**`/api/status` 活数据复测通过**（识别 new-api + 探测 500000） | 本轮 |
 
-**累计新增 55 个单测，全部通过。**
+**累计新增单测：55（R1-R3）+ 47（S0/T02 轮）＝ 102 个，全部通过。**
 
-### 尚未闭环（如实记账）
+### 尚未闭环（如实记账，对照 11-plan-v1.1.md §5.2 待验证清单）
 
-1. **new-api 适配器未对真实站点跑通过**。端点与认证依据的是上游 `dsh-stats-panel/docs/CHANNELS.md`、one-api `docs/API.md`、new-api `new-api-key-tool` 的二手证据，`providers/newapi.ts` 文件末列了 4 条待实测项（`Bearer` 对 one-api 老版本是否兼容、`/api/status` 是否免鉴权、`data.quota` 语义、Cloudflare 归类）。**需要用户提供 ≥1 个真实站点才能闭环。**
-2. **`/relays` HTTP 端点未接**。路由分发在 `src/host/index.ts` 的单一 prefix handler（`ROUTE_PREFIX` + `url.pathname.slice`），尚未插入 relays 分支。
-3. **`sections.relays` 状态叶未接**，`refreshBalance` 仍只走上游单服务商链路。
-4. **sub2api / openai-compat 适配器未写**（契约已声明，注册表返回 `unsupported`）。
-5. **凭证明文落盘**：独立模式无 keychain，`relay-credentials.json` 目前是明文（计划 Q1，V2 用 keytar/DPAPI）。
+1. ~~**new-api 适配器未对真实站点跑通过**~~ → **已闭环**（轮 8 真站实测 + 轮 9 按实测重构 + `/api/status` 活数据复测；`/api/usage/token/` 与 billing 链路有待验证项 V1/V2 见下）
+2. **V1** `/api/user/self` 账户级余额真实形状 —— 需要一个 **AccessToken**（本站只有 API Key）
+3. **V2** 有额度（非无限）Key 的 `hard_limit_usd − total_usage/100` 剩余公式 —— 需要一个**有额度的 Key**
+4. **V3** Cloudflare 真拦截响应形态 —— 需要被挑战过的站点（判定表已按修订 #23 实现，未实测）
+5. **`/relays/detect`、`/relays/models`、`/relays/focus` 三端点未接路由**（detect.ts 纯函数已就绪，T03）
+6. **`sections.relays` 客户端零消费**（T04：桌宠不显示中转站余额）
+7. **sub2api / openai-compat 适配器未写**（T05/T09；契约已声明，注册表返回 `unsupported`）
+8. **`API.md`/`openapi.yaml` 无 `/relays` 契约**（T08）
+9. **凭证明文落盘**：`relay-credentials.json` 明文（Q1 决策 V2 上 keytar/DPAPI；README 显著提示待 T08）

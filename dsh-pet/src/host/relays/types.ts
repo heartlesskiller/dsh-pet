@@ -31,11 +31,15 @@ export const RELAY_KINDS: readonly RelayKind[] = ['new-api', 'sub2api', 'openai-
 // ---------- 凭证 ----------
 
 /**
- * 凭证种类。
- * - `access-token`：站点「个人设置 → 系统令牌」生成的系统访问令牌（**推荐**，能查余额）
- * - `api-key`：模型 API Key（sk-…）。多数站点查不了总余额，仅 new-api 新版可查 user_quota
- * - `session-cookie`：浏览器会话 Cookie（高级，易失效）
+ * 凭证种类。引导顺序（真站实测 docs/10 + 修订 #5/#22）：**API Key 优先** ——
+ * new-api 新版经 `/api/usage/token/` 可用模型 Key 查令牌级用量与无限额度标记，覆盖面最广。
+ * - `api-key`：模型 API Key（sk-…）。**推荐优先引导**
+ * - `access-token`：站点「个人设置 → 系统令牌」生成的系统访问令牌，可查账户级余额（`/api/user/self`）
+ * - `session-cookie`：浏览器会话 Cookie（高级逃生口，易失效）
  * - `manual`：**无凭证**，余额由用户手工填写（查不到时的降级路径，不是失败）
+ *
+ * 纪律（修订 #20）：**凭证类型之间不自动降级** —— AT 预检成功后的业务错误不回退 Cookie；
+ * 降级只发生在「同一凭证内的端点三级链」（见 providers/newapi.ts）。
  */
 export type RelayCredentialKind = 'access-token' | 'api-key' | 'session-cookie' | 'manual';
 
@@ -68,6 +72,12 @@ export interface RelaySite {
    * 站长可改 → 必须允许按站点覆盖。**换算只在 ./money.ts 做，别处不许自算。**
    */
   quotaPerUnit: number;
+  /**
+   * 换算率是否已确认（探测到 `quota_per_unit` 或用户手动核对过）。
+   * 建站时显式写默认值 500000 且 `rateConfirmed:false`（修订 #11）——
+   * **绝不静默默认**：未确认的站点余额带 `rateUnconfirmed` 标记，不参与低余额告警。
+   */
+  rateConfirmed?: boolean;
   /** 是否参与刷新与告警 */
   enabled: boolean;
   /** 手工填写的余额（`source: 'manual'` 时使用）。与自动值互斥，不参与自动刷新覆盖 */
@@ -107,13 +117,34 @@ export interface RelayBalanceSuccess {
   shape: 'money';
   source: RelayBalanceSource;
   data: MoneyBalance;
+  /**
+   * 数据口径（真站实测 docs/10）：`account` = 账户级（`/api/user/self`，需 AccessToken）；
+   * `token` = 令牌级（`/api/usage/token/`、billing 双端点，API Key 可查）。
+   */
+  scope?: 'account' | 'token';
+  /**
+   * 无限额度站（`unlimited_quota===true` 或 `hard_limit_usd>=1e8` 哨兵，F2）。
+   * 此时 `data.total` 放的是**已用金额**（与 `spent` 同值）而非余额 ——
+   * 客户端必须渲染成「无限额度 · 已用 $X」，**绝不渲染成「余额」**（语义反了）。
+   * 无限站不设 `fullBalance` → 六档动画自然不播（无基准不播）。
+   */
+  unlimited?: boolean;
+  /** 已用金额（unlimited 时与 `data.total` 同值） */
+  spent?: string;
+  /**
+   * 换算率未经确认（站点 `rateConfirmed !== true`，修订 #11/OP-6）：
+   * 客户端显示「换算率未确认，请核对」，且该站**不参与低余额告警**（数据不可靠不评估）。
+   */
+  rateUnconfirmed?: boolean;
 }
 
 /**
- * 失败结果。五种 reason 一个出口。
+ * 失败结果。六种 reason 一个出口。
  *
  * `manual` 不是失败而是**降级路径**：查不到余额时用户手工填，界面必须带「手工」标签与
  * 填写时间，不得伪装成实时数据。
+ * `blocked` = 被 Cloudflare / 反代 / Bot Detection 拦（修订 #23 判定表）；
+ * `rate-limited` = 站点返回 429（one-api 系默认 480/180s，是现实风险）。
  */
 export type RelayBalanceResult =
   | RelayBalanceSuccess
@@ -121,7 +152,7 @@ export type RelayBalanceResult =
       ok: false;
       siteId: string;
       provider: string;
-      reason: 'unsupported' | 'credential-missing' | 'fetch-error' | 'manual';
+      reason: 'unsupported' | 'credential-missing' | 'fetch-error' | 'manual' | 'blocked' | 'rate-limited';
       message?: string;
     };
 
