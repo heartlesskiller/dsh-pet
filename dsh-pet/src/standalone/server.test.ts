@@ -2,7 +2,7 @@
  * 独立模式 HTTP 服务的契约测试。
  *
  * 这一层**不碰插件**（路由注入假 handler）：它钉的是独立模式自己写的那部分 ——
- * 前缀转交、运维端点（`/`、`/health`、`/shutdown`）、异常收口、端口顺延与关闭释放。
+ * 前缀转交、运维端点（`/`、`/health`、`/shutdown`）、异常收口、端口冲突即失败（不顺延）与关闭释放。
  * 插件路由表本身的契约由 integration.test.ts 覆盖（那份是真实 apply 注册出来的）。
  */
 import { after, describe, test } from 'node:test';
@@ -67,9 +67,12 @@ function pluginLikeRoute(onCall?: (url: string) => void): RegisteredRoute {
 }
 
 /** 占住一个端口，返回端口号与关闭函数 */
-async function occupyPort(): Promise<{ port: number; close: () => Promise<void> }> {
+async function occupyPort(preferred = 0): Promise<{ port: number; close: () => Promise<void> }> {
   const server: Server = createServer((_req, res) => res.end('busy'));
-  await new Promise<void>((accept) => server.listen(0, '127.0.0.1', () => accept()));
+  await new Promise<void>((accept, reject) => {
+    server.once('error', reject);
+    server.listen(preferred, '127.0.0.1', () => accept());
+  });
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : 0;
   return { port, close: () => new Promise<void>((accept) => server.close(() => accept())) };
@@ -200,21 +203,36 @@ describe('listenStandaloneServer —— 端口与关闭', () => {
     for (const close of closers.splice(0)) await close().catch(() => {});
   });
 
-  test('首选端口被占用时向后顺延，关闭后端口真正释放', async () => {
+  test('首选端口被占用 → 明确抛错，绝不顺延到别的端口', async () => {
     const blocker = await occupyPort();
     closers.push(blocker.close);
-    const server = await listenStandaloneServer({ routes: [pluginLikeRoute()], logger: silent, port: blocker.port });
-    closers.push(server.close);
-    assert.ok(server.port > blocker.port, `期望顺延，实际 ${server.port}（被占 ${blocker.port}）`);
+    // 顺延是「第二次启动静默起出第二只桌宠」的成因（见 ./instance-lock），必须炸出来
+    await assert.rejects(
+      () => listenStandaloneServer({ routes: [pluginLikeRoute()], logger: silent, port: blocker.port }),
+      (error: unknown) => {
+        assert.match((error as Error).message, /端口 .* 已被占用/);
+        assert.match((error as Error).message, /只跑一个实例/);
+        return true;
+      },
+    );
+    // 且没有在别的端口上偷偷起服务：相邻端口必须仍可被占用
+    // （占得上 = 没有监听者；顺延会留下偷听的 socket，这里必须还能 bind 成功）
+    for (const port of [blocker.port + 1, blocker.port + 2]) {
+      // 探针 server 成功占用后立即登记收尾：任何路径都不泄漏句柄
+      // （泄漏会让 node 进程永不退出，全量测试被拖到超时）
+      const probe = await occupyPort(port);
+      closers.push(probe.close);
+    }
+  });
 
-    const response = await fetch(`http://127.0.0.1:${server.port}/`);
+  test('关闭后端口真正释放（keep-alive 连接没被断掉的话这里会 EADDRINUSE）', async () => {
+    const server = await listenStandaloneServer({ routes: [pluginLikeRoute()], logger: silent, port: 0 });
+    const port = server.port;
+    const response = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(response.status, 200);
     const body = (await response.json()) as { name?: string };
     assert.equal(body.name, 'dsh-pet-standalone');
-
-    const port = server.port;
     await server.close();
-    // 关闭必须释放端口：再用同一个端口起一个服务应成功（keep-alive 连接没被断掉的话这里会 EADDRINUSE）
     const reuse = createServer((_req, res) => res.end('reused'));
     await new Promise<void>((accept, reject) => {
       reuse.once('error', reject);

@@ -18,8 +18,12 @@
  * 独立模式的边界：动画、物理拖拽、右键菜单、多开、自定义素材与宠物种类全部可用；
  * 余额、碎碎念、对话、系统通知依赖 DSH 的凭证/模型/会话，在独立模式下明确不可用
  * （结构化失败 + 日志，不假装成功）。详见 README 的「独立运行（不打开 DSH）」一节。
+ *
+ * 单实例：启动时先取实例锁（`./instance-lock`），锁被占用 → stderr 说明原因 + 非零退出码，
+ * **不会顺延到别的端口**（顺延会让第二次启动静默起出第二只桌宠）。
  */
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { flattenPetList, readAllConfig } from '../host/config';
 import { dshHomeDir, packageRoot } from '../host/helper-process';
@@ -31,11 +35,15 @@ import {
   type RegisteredRoute,
   type StandaloneLogger,
 } from './context';
+import { acquireInstanceLock, InstanceLockBusyError, type InstanceLock } from './instance-lock';
 import { configPathsFor, describePets, isDesktopVisible, parseArgs, USAGE } from './options';
 import { listenStandaloneServer } from './server';
 
+/** 实例锁文件位置：与宠物数据同根（`<dshHome>/dsh-pet/standalone.lock`） */
+const lockPathFor = (home: string): string => join(home, 'dsh-pet', 'standalone.lock');
+
 /** 启动独立模式：先起服务拿到端口，再 `apply`（插件据此拼桌面 Helper 的 configUrl） */
-async function run(logger: StandaloneLogger, options: { port: number }): Promise<void> {
+async function run(logger: StandaloneLogger, options: { port: number }): Promise<number> {
   const home = dshHomeDir();
   const paths = configPathsFor(packageRoot, home);
 
@@ -45,8 +53,21 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
       `包内默认配置缺失：${paths.defaultFile}。若你是在直接跑源码（包根被解析成了 src/），` +
         '请改用构建产物：npm run bundle 后 node lib/standalone.js（或 npm run standalone）。',
     );
-    process.exitCode = 1;
-    return;
+    return 1;
+  }
+
+  // 单实例锁：必须在绑定端口**之前**取。被占用就明确失败并退出，绝不顺延端口。
+  const lockPath = lockPathFor(home);
+  let lock: InstanceLock;
+  try {
+    lock = acquireInstanceLock({ lockPath, port: options.port });
+  } catch (error) {
+    if (error instanceof InstanceLockBusyError) {
+      // 走 stderr（logger 一律写 stdout）：失败原因要让 shell / 启动脚本第一时间看到
+      console.error(`dsh-pet-standalone: ${error.message}`);
+      return 1;
+    }
+    throw error;
   }
 
   const routes: RegisteredRoute[] = [];
@@ -74,9 +95,10 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info(`收尾（${reason}）…`);
-    // 先释放插件注册的 effect（停桌面 Helper、清周期定时器），再关服务
+    // 先释放插件注册的 effect（停桌面 Helper、清周期定时器），再关服务，最后放实例锁
     await context.dispose();
     await server.close();
+    lock.release();
     logger.info('已退出。');
   };
   const requestShutdown = (reason: string): void => {
@@ -124,6 +146,7 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
   if (context.failures.length > 0) {
     logger.warn(`初始化期间有 ${context.failures.length} 项失败（见上方日志）；路由仍可用，相关端点会显式报错`);
   }
+  return 0;
 }
 
 /** CLI 入口 */
@@ -141,8 +164,7 @@ async function main(): Promise<number> {
   }
   const logger = createStandaloneLogger();
   if (options.check) return runCheck(logger);
-  await run(logger, options);
-  return 0;
+  return run(logger, options);
 }
 
 // 本文件就是可执行入口（package.json 的 bin 指向构建产物 lib/standalone.js），

@@ -3,7 +3,8 @@
  *
  * 这里**没有路由表** —— 路由表属于插件自己的宿主半边（`apply` 注册在 `ctx.webServer` 上的
  * prefix handler，见 `./context`）。本模块只做四件事：
- *   1. 绑定 127.0.0.1（端口被占用则顺延，独立模式没有 DSH 指定的固定端口）；
+ *   1. 绑定 127.0.0.1 的**指定**端口（被占用 → 明确失败，**绝不顺延**：顺延会让第二次启动
+ *      静默起出第二只桌宠，见 `./instance-lock` 的三重后果）；
  *   2. 把落在插件路由前缀上的请求原样交给那份 handler（它自己写响应头与 body）；
  *   3. 提供 `/` 与 `/health`（运维信息）和 `/shutdown`（脚本化停机）；
  *   4. 兜住 handler 的异常，按插件自身的口径回 500 JSON。
@@ -19,8 +20,6 @@ import type { RegisteredRoute, StandaloneLogger } from './context';
 
 /** 独立模式默认端口（与插件 helper 的内置默认一致） */
 export const DEFAULT_STANDALONE_PORT = 3080;
-/** 端口被占用时向后顺延的个数上限 */
-export const PORT_SCAN_LIMIT = 25;
 
 export interface StandaloneServerOptions {
   /** 插件注册的路由（与 `createStandaloneContext` 共用同一个数组） */
@@ -135,34 +134,45 @@ export function createRequestListener(
   };
 }
 
-/** 从 preferred 起找一个能绑上的 127.0.0.1 端口；`preferred = 0` 表示交给系统分配 */
-async function bindFirstFree(server: HttpServer, preferred: number, logger: StandaloneLogger): Promise<number> {
-  for (let port = preferred; port < preferred + PORT_SCAN_LIMIT; port += 1) {
-    try {
-      await new Promise<void>((accept, reject) => {
-        const onError = (error: Error): void => {
-          server.off('listening', onListening);
-          reject(error);
-        };
-        const onListening = (): void => {
-          server.off('error', onError);
-          accept();
-        };
-        server.once('error', onError);
-        server.once('listening', onListening);
-        server.listen(port, '127.0.0.1');
-      });
-      // 真实端口必须回读 address()：传 0 时监听端口由系统分配，不等于请求值
-      const address = server.address();
-      const bound = typeof address === 'object' && address !== null ? address.port : port;
-      if (preferred > 0 && bound !== preferred) logger.warn(`端口 ${preferred} 被占用，改用 ${bound}`);
-      return bound;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EADDRINUSE') throw error;
+/**
+ * 绑定 127.0.0.1 的指定端口；`port = 0` 表示交给系统分配。
+ *
+ * **被占用就抛错，不顺延**：顺延是「第二次启动静默起出第二只桌宠」的直接成因
+ * （详见 `./instance-lock` 的模块注释）。单实例由调用方在绑定前用实例锁保证；
+ * 走到这里还撞端口，说明锁没配上或被绕过，必须显式炸出来。
+ */
+async function bindPort(server: HttpServer, port: number): Promise<number> {
+  try {
+    await new Promise<void>((accept, reject) => {
+      const onError = (error: Error): void => {
+        server.off('listening', onListening);
+        reject(error);
+      };
+      const onListening = (): void => {
+        server.off('error', onError);
+        accept();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(port, '127.0.0.1');
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      // cause 链要留住：排错时得能看到底层就是 EADDRINUSE。tsconfig 的 lib 是 ES2020
+      // （没有 ErrorOptions 类型），运行时 Node >= 22.12 原生支持 cause，用一次转型
+      // 把两者接上（与 src/host/relays/store.ts 的 errorWithCause 同一口径）。
+      const err = new Error(
+        `端口 ${port} 已被占用。独立模式只跑一个实例（第二个实例会起出两只桌宠、双倍轮询中转站）；` +
+          '若这是第二次启动，请先结束已有实例；确需换端口请显式传 --port。',
+      );
+      (err as Error & { cause?: unknown }).cause = error;
+      throw err;
     }
+    throw error;
   }
-  throw new Error(`从 ${preferred} 起连续 ${PORT_SCAN_LIMIT} 个端口都被占用`);
+  // 真实端口必须回读 address()：传 0 时监听端口由系统分配，不等于请求值
+  const address = server.address();
+  return typeof address === 'object' && address !== null ? address.port : port;
 }
 
 /**
@@ -174,7 +184,7 @@ export async function listenStandaloneServer(options: StandaloneServerOptions): 
   const server = createServer(createRequestListener(options));
   // 客户端半截请求（扫描器、被中断的连接）不该变成未捕获异常刷屏
   server.on('clientError', (_error, socket) => socket.destroy());
-  const port = await bindFirstFree(server, options.port ?? DEFAULT_STANDALONE_PORT, options.logger);
+  const port = await bindPort(server, options.port ?? DEFAULT_STANDALONE_PORT);
   options.logger.info(`独立模式服务已监听 http://127.0.0.1:${port}/`);
   return {
     port,
