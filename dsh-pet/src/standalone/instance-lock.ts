@@ -28,7 +28,8 @@
  * - **锁文件落在用户数据目录**：卸载/清理工具删掉它属于预期行为（删了正好解锁）。
  */
 
-import { closeSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 /** 锁文件里记的内容（诊断用：告诉用户是谁占着） */
 export interface InstanceLockInfo {
@@ -119,6 +120,10 @@ export function acquireInstanceLock(options: AcquireInstanceLockOptions): Instan
   const maxRetries = options.maxRetries ?? 3;
   const removeLock = options.removeLock ?? ((path: string) => rmSync(path, { force: true }));
   const info: InstanceLockInfo = { pid: process.pid, port, startedAt: new Date().toISOString() };
+
+  // 锁文件的父目录可能还不存在（首次运行 / 全新的 DSH_HOME）：`open(..., 'wx')` 在父目录缺失时
+  // 报的是 ENOENT（不是 EEXIST），会被误当成「IO 故障」直接崩。先建目录再取锁。
+  mkdirSync(dirname(lockPath), { recursive: true });
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     let fd: number;

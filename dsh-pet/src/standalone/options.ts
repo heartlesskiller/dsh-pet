@@ -24,7 +24,7 @@ export const USAGE = `dsh-pet 独立模式（不需要 DSH）
 用法：dsh-pet-standalone [选项]
 
 选项：
-  --port <端口>   监听端口（默认 ${DEFAULT_STANDALONE_PORT}；被占用时自动向后顺延）
+  --port <端口>   监听端口（默认 ${DEFAULT_STANDALONE_PORT}；被占用会明确失败——独立模式只跑一个实例）
   --check         只体检：打印配置来源、宠物清单与 Electron 状态，不启动窗口
   -h, --help      显示本帮助
 

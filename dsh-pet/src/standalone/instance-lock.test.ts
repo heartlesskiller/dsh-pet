@@ -10,7 +10,7 @@
  * 存活判定一律注入，不杀真进程：测试自己决定「那个 PID 活不活」。
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -160,3 +160,18 @@ test('maxRetries 用尽仍抢不到 → 抛错而不是死循环', () => {
 function lock0Path(dir: string): string {
   return join(dir, 'standalone.lock');
 }
+
+test('父目录不存在（首次运行 / 全新 DSH_HOME）→ 自动建目录后取锁成功', () => {
+  const dir = tmpDir();
+  try {
+    // 模拟 <DSH_HOME>/dsh-pet/ 尚不存在：锁文件落在两层新目录里
+    const lockPath = join(dir, 'dsh-pet', 'nested', 'standalone.lock');
+    const lock = acquireInstanceLock({ lockPath, port: 3080 });
+    assert.equal(lock.path, lockPath);
+    assert.ok(readFileSync(lockPath, 'utf8').includes(String(process.pid)));
+    lock.release();
+    assert.equal(existsSync(lockPath), false, 'release 后锁文件应被删掉');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
