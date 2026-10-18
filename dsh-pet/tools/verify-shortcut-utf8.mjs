@@ -83,6 +83,53 @@ const codepoints = (text) =>
     .map((ch) => ch.codePointAt(0).toString(16))
     .join(' ');
 
+/**
+ * 要验的两种 .lnk 文件名：
+ *   ascii —— 常规名字
+ *   cjk   —— **多字节文件名**（"启动 DSH 桌宠_测试.lnk"）：写/读 .lnk 的路径本身也要能
+ *            处理中文，只验 description 字段不够 —— 路径里的中文走的是另一条系统调用。
+ */
+const CASES = [
+  { name: 'ascii', fileName: 'utf8-check.lnk' },
+  { name: 'cjk', fileName: '启动 DSH 桌宠_测试.lnk' },
+];
+
+/** 跑一个用例；返回 { ok, lines } */
+async function runCase(exe, dir, testCase) {
+  const outLnk = join(dir, testCase.fileName);
+  const specPath = join(dir, `spec-${testCase.name}.json`);
+  const lines = [];
+
+  const spec = JSON.parse(readFileSync(FIXTURE, 'utf8'));
+  spec.lnk = outLnk;
+  writeFileSync(specPath, JSON.stringify(spec, null, 2), 'utf8');
+
+  // 首参以 .json 结尾 → make-shortcut 自动走 JSON 模式（不需要 flag）
+  const run = await runElectron(exe, resolve(HERE, 'make-shortcut.mjs'), [specPath]);
+  const result = parseResult(run.stdout);
+  if (result === null) {
+    lines.push(`  [${testCase.name}] 没拿到 RESULT；stdout=${JSON.stringify(run.stdout.slice(0, 400))} stderr=${JSON.stringify(run.stderr.slice(0, 400))}`);
+    return { ok: false, lines };
+  }
+
+  const actual = result?.read?.description;
+  const actualCp = codepoints(actual);
+  const expectedCp = codepoints(EXPECTED_DESCRIPTION);
+  // 防「假绿」：两边都空串也会相等 —— 必须先断言期望值非空、实际值非空
+  const expectedNotEmpty = expectedCp.length > 0;
+  const actualNotEmpty = actualCp.length > 0;
+  const same = expectedNotEmpty && actualNotEmpty && actualCp === expectedCp;
+
+  lines.push(`  [${testCase.name}] lnk      = ${result.lnk}`);
+  lines.push(`  [${testCase.name}] target   = ${result?.read?.target}`);
+  lines.push(`  [${testCase.name}] exitCode = ${run.code}`);
+  lines.push(`  [${testCase.name}] actual   = ${JSON.stringify(actual)}`);
+  lines.push(`  [${testCase.name}] actual   cps = ${actualCp || '(空串 —— 假绿！)'}`);
+  lines.push(`  [${testCase.name}] expected cps = ${expectedCp || '(空串 —— 期望值本身坏了)'}`);
+  lines.push(`  [${testCase.name}] ${same ? 'PASS' : 'FAIL'}（期望非空=${expectedNotEmpty} 实际非空=${actualNotEmpty} 码点一致=${actualCp === expectedCp}）`);
+  return { ok: same && run.code === 0, lines };
+}
+
 async function main() {
   const exe = resolveElectron();
   if (exe === null) {
@@ -95,36 +142,15 @@ async function main() {
   }
 
   const dir = mkdtempSync(join(tmpdir(), 'shortcut-utf8-'));
-  const outLnk = join(dir, 'utf8-check.lnk');
-  const specPath = join(dir, 'spec.json');
   try {
-    const spec = JSON.parse(readFileSync(FIXTURE, 'utf8'));
-    spec.lnk = outLnk;
-    writeFileSync(specPath, JSON.stringify(spec, null, 2), 'utf8');
-
-    // 首参以 .json 结尾 → make-shortcut 自动走 JSON 模式（不需要 flag）
-    const run = await runElectron(exe, resolve(HERE, 'make-shortcut.mjs'), [specPath]);
-    const result = parseResult(run.stdout);
-    if (result === null) {
-      yell('[verify-shortcut] 没拿到 RESULT，stdout/stderr：');
-      yell(run.stdout);
-      yell(run.stderr);
-      return 1;
+    let allOk = true;
+    for (const testCase of CASES) {
+      const r = await runCase(exe, dir, testCase);
+      for (const line of r.lines) say(line);
+      if (!r.ok) allOk = false;
     }
-
-    const actual = result?.read?.description;
-    const actualCp = codepoints(actual);
-    const expectedCp = codepoints(EXPECTED_DESCRIPTION);
-    const same = actualCp === expectedCp;
-
-    say('[verify-shortcut] source        =', result.source);
-    say('[verify-shortcut] exitCode      =', run.code);
-    say('[verify-shortcut] target        =', result?.read?.target);
-    say('[verify-shortcut] description   =', JSON.stringify(actual));
-    say('[verify-shortcut] actual   cps  =', actualCp);
-    say('[verify-shortcut] expected cps  =', expectedCp);
-    say(same ? '[verify-shortcut] PASS —— 中文逐码点一致' : '[verify-shortcut] FAIL —— 码点不一致');
-    return same && run.code === 0 ? 0 : 1;
+    say(allOk ? '[verify-shortcut] ALL PASS —— 两种文件名下中文都逐码点一致' : '[verify-shortcut] FAIL');
+    return allOk ? 0 : 1;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
