@@ -146,6 +146,7 @@ import {
   putCredential,
   readFocus,
   readModelCache,
+  recordSnapshots,
   removeSite,
   saveSites,
   setSiteModels,
@@ -153,7 +154,9 @@ import {
   toSiteView,
   upsertSite,
   writeFocus,
+  type DaySnapshots,
   type SiteInput,
+  type SnapshotStore,
 } from './relays/store';
 import { DEFAULT_QUOTA_PER_UNIT } from './relays/money';
 import { fetchSiteModels, probeModels, probeStatus } from './relays/providers/newapi';
@@ -717,6 +720,20 @@ export function apply(ctx: any): void {
   };
 
   /**
+   * 本地时区的 `YYYY-MM-DD`（T11 快照的日键）。
+   *
+   * **必须用本地时区，不能用 UTC**：用户关心的"今天"是他自己电脑上的今天。
+   * 东八区在 UTC 00:00–08:00 之间会被 UTC 算成"昨天"，快照就会落到错误的日桶里，
+   * 速率的分母跟着错。这里与 shared/relays.ts 的 `dayKeyOf` 同口径（host 自包含，不 import shared）。
+   */
+  const localDayKey = (now: Date = new Date()): string => {
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
+  /**
    * 刷新中转站状态叶 `sections.relays`。
    *
    * 与 `sections.balance` **并存，互不改动**：前者是 DSH 宿主的单服务商余额（原链路一字不动），
@@ -740,6 +757,26 @@ export function apply(ctx: any): void {
         queryAllBalances(relayDir, sites),
         Promise.all(sites.map((s) => checkSiteHealth(relayDir, s))),
       ]);
+      // T11：把今天的余额记进每日快照（消耗速率的数据源）。挂在**既有**余额刷新周期上，
+      // 不另起定时器。日键用**本地时区**（用户关心的"今天"是他自己电脑上的今天）。
+      const today = localDayKey();
+      const entries: DaySnapshots = {};
+      for (const r of results) {
+        if (!r.ok) continue; // 查不到的站不记：记了就是假数据
+        entries[r.siteId] = r.unlimited === true
+          ? { unlimited: true, ...(r.spent !== undefined ? { spent: r.spent } : {}) }
+          : {
+              ...(r.spent !== undefined ? { spent: r.spent } : {}),
+              ...(r.data.total !== undefined ? { remaining: r.data.total } : {}),
+            };
+      }
+      let snapshots: SnapshotStore = {};
+      try {
+        snapshots = recordSnapshots(relayDir, today, entries);
+      } catch (e) {
+        // 快照写不进去不该让余额叶失败：这一拍照常下发，只是没有今日快照
+        ctx.logger?.warn?.(`[dsh-pet] 写入余额快照失败：${e instanceof Error ? e.message : String(e)}`);
+      }
       state.writeSection('relays', {
         // 焦点站点（D2：放 sections.relays 的 data 里，不为一个字段改 state.ts 地基）。
         // 只影响展示口径，绝不做请求转发（Q4 Non-Goal）。
@@ -748,6 +785,10 @@ export function apply(ctx: any): void {
         sites: results,
         health,
         refreshedAt: new Date().toISOString(),
+        // T11：今日（本地时区）+ 快照窗口。速率/预计天数由客户端用 shared/relays.ts
+        // 的纯函数现算 —— 算法只有一份，host 不自带第二份。
+        today,
+        snapshots,
       });
     } catch (e) {
       state.writeSection('relays', {

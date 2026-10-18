@@ -62,6 +62,13 @@ export interface RelaysView {
   sites: RelaysSiteResult[];
   health: RelaysHealthEntry[];
   refreshedAt?: string;
+  /**
+   * 每日快照窗口（host 下发；本地时区日键）。消耗速率/预计天数由客户端用
+   * {@link computeBurnRate} / {@link projectedDays} 现算 —— 算法只有一份。
+   */
+  snapshots?: SnapshotStore;
+  /** 今天（本地时区 `YYYY-MM-DD`，host 下发）。客户端不自己取时钟，避免两端漂移 */
+  today?: string;
 }
 
 // ---------- 防御式解析（形状非法 → null，不抛） ----------
@@ -135,6 +142,7 @@ export function readRelays(data: unknown): RelaysView | null {
         .filter((e): e is RelaysHealthEntry => e !== undefined)
     : [];
   const focusSiteId = typeof root.focusSiteId === 'string' && root.focusSiteId.length > 0 ? root.focusSiteId : null;
+  const snapshotsRaw = asObj(root.snapshots);
   const fullBalance = asStr(summary.fullBalance);
   return {
     focusSiteId,
@@ -169,7 +177,30 @@ export function readRelays(data: unknown): RelaysView | null {
     sites,
     health,
     ...(asStr(root.refreshedAt) !== undefined ? { refreshedAt: asStr(root.refreshedAt) } : {}),
+    ...(asStr(root.today) !== undefined ? { today: asStr(root.today) } : {}),
+    ...(snapshotsRaw !== undefined ? { snapshots: parseSnapshots(snapshotsRaw) } : {}),
   };
+}
+
+/** 快照表解析：坏条目跳过，整体形状不对 → 空表（派生数据，不抛） */
+function parseSnapshots(raw: Record<string, unknown>): SnapshotStore {
+  const out: SnapshotStore = {};
+  for (const [day, value] of Object.entries(raw)) {
+    const dayObj = asObj(value);
+    if (dayObj === undefined) continue;
+    const entries: DaySnapshots = {};
+    for (const [siteId, entry] of Object.entries(dayObj)) {
+      const e = asObj(entry);
+      if (e === undefined) continue;
+      entries[siteId] = {
+        ...(asStr(e.spent) !== undefined ? { spent: asStr(e.spent) } : {}),
+        ...(asStr(e.remaining) !== undefined ? { remaining: asStr(e.remaining) } : {}),
+        ...(e.unlimited === true ? { unlimited: true } : {}),
+      };
+    }
+    out[day] = entries;
+  }
+  return out;
 }
 
 // ---------- 折成 money 形态（喂既有六档动画机） ----------
@@ -261,10 +292,12 @@ export function relaysBubbleRows(view: RelaysView): BalanceBubbleRow[] {
     const sym = symbolOf(target.site.currency ?? 'USD');
     if (target.unlimited) {
       const spent = target.site.spent ?? target.site.total ?? '-';
+      // 无限额度站**没有预计天数那一行**（没有 remaining 就没有"还能用多久"）
       return [{ role: 'label', text: '无限额度 · 已用 ' + sym + spent }];
     }
     const label = target.manual ? '余额 ' + sym + (target.site.total ?? '-') + '（手工）' : '余额 ' + sym + (target.site.total ?? '-');
     const rows: BalanceBubbleRow[] = [{ role: 'label', text: label }];
+    rows.push(...burnRows(view, target.site.siteId, sym));
     const low = view.summary.lowSites.find((s) => s.siteId === target.site.siteId);
     if (low) rows.push({ role: 'sub', text: '⚠ 低于阈值 ' + sym + low.threshold });
     if (target.site.rateUnconfirmed === true) rows.push({ role: 'sub', text: '换算率未确认，请核对' });
@@ -282,6 +315,7 @@ export function relaysBubbleRows(view: RelaysView): BalanceBubbleRow[] {
   } else {
     rows.push({ role: 'label', text: '全部站点均为无限额度' });
   }
+  rows.push(...fleetBurnRows(view));
   const low = lowSitesText(view.summary.lowSites);
   if (low) rows.push({ role: 'sub', text: low });
   if (view.summary.unlimitedCount > 0) {
@@ -381,4 +415,231 @@ export function readModelMatrix(payload: unknown): RelaysModelMatrix | null {
     rows.push({ id, cells });
   }
   return { rows, unknownSiteCount: asNum(obj.unknownSiteCount) ?? 0 };
+}
+
+// ---------- 消耗速率与预计可用天数（T11） ----------
+
+/**
+ * 一天的快照（host 的 `snapshots.json` 里的一片）。
+ * `spent` 是**累计已用**（不是当日增量）—— 速率靠累计值的差分算，充值不会污染它。
+ */
+export interface DaySnapshotEntry {
+  spent?: string;
+  remaining?: string;
+  unlimited?: boolean;
+}
+
+/** 一天的快照：siteId → 该站当天的累计数据 */
+export type DaySnapshots = Record<string, DaySnapshotEntry>;
+
+/** 全部快照：`YYYY-MM-DD`（**本地时区**，不是 UTC）→ 当天的各站数据 */
+export type SnapshotStore = Record<string, DaySnapshots>;
+
+/** 本地时区的 `YYYY-MM-DD`。纯函数：日期由调用方给，本模块不读时钟 */
+export function dayKeyOf(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/** 两个 `YYYY-MM-DD` 之间的日历天数；键非法 → null（不猜） */
+export function daysBetween(fromDay: string, toDay: string): number | null {
+  const a = Date.parse(`${fromDay}T00:00:00Z`);
+  const b = Date.parse(`${toDay}T00:00:00Z`);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return Math.round((b - a) / 86_400_000);
+}
+
+/** 速率判定所需的最少观测跨度（天）。少于它 → 数据不足，**不猜** */
+export const BURN_MIN_SPAN_DAYS = 3;
+
+/**
+ * 单站消耗速率（美元/天）。**数据不足 → null，绝不返回 0。**
+ *
+ * 五个坑都在这里防（每条都有对应用例）：
+ * 1. **只有 1 天快照 → null**。返回 0 会让 UI 显示「0 美元/天」或「预计 ∞ 天」，都是假数据；
+ * 2. **中间断档不当 0 消耗**：速率按「首末两次观测的**日历跨度**」平均 —— 用户 3 天没开机，
+ *    第 4 天又开，那 3 天确实没花钱，摊到跨度里才是真实均值；跨度 < {@link BURN_MIN_SPAN_DAYS}
+ *    天 → null（样本太短，噪声比信号大）；
+ * 3. 端点缺 `spent`（没有累计用量就算不出速率）→ null；
+ * 4. 速率为负（期间充值过）→ null：负速率对「还能用多久」没有意义，不猜；
+ * 5. **本函数不读时钟**：`today` 由调用方传入（host 下发，避免客户端各自取时钟漂移）。
+ *
+ * @param snapshots 快照表（本地时区日键）
+ * @param siteId    站点 id
+ * @param today     今天（`YYYY-MM-DD`，本地时区）；晚于它的快照一律忽略（防时钟漂移写出未来日子）
+ */
+export function computeBurnRate(snapshots: SnapshotStore, siteId: string, today: string): number | null {
+  const days = Object.keys(snapshots ?? {})
+    .filter((day) => day <= today)
+    .filter((day) => {
+      const entry = snapshots[day]?.[siteId];
+      return entry !== undefined && typeof entry.spent === 'string' && entry.spent.length > 0;
+    })
+    .sort();
+  if (days.length < 2) return null; // 坑 1
+  const first = days[0];
+  const last = days[days.length - 1];
+  const span = daysBetween(first, last);
+  if (span === null || span < BURN_MIN_SPAN_DAYS) return null; // 坑 2
+  const from = Number(snapshots[first][siteId].spent);
+  const to = Number(snapshots[last][siteId].spent);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null; // 坑 3
+  const burn = (to - from) / span;
+  if (!(burn > 0)) return null; // 坑 4（负值/NaN 一律不算）
+  return burn;
+}
+
+/**
+ * 预计剩余可用天数。
+ *
+ * - 速率未知 / 速率 ≤ 0 / remaining 缺失 → **null**（不是 ∞、不是 0 —— 那两个都是假数据）；
+ * - remaining ≤ 0 → **0**（已经用完了，这个 0 是有意义的）；
+ * - 其余 → `remaining / dailyBurn`，不取整（展示层自己定格式）。
+ */
+export function projectedDays(
+  remaining: string | null | undefined,
+  dailyBurn: number | null | undefined,
+): number | null {
+  if (dailyBurn === null || dailyBurn === undefined || !(dailyBurn > 0)) return null;
+  if (remaining === null || remaining === undefined || remaining.length === 0) return null;
+  const left = Number(remaining);
+  if (!Number.isFinite(left)) return null;
+  if (left <= 0) return 0;
+  return left / dailyBurn;
+}
+
+/** 单站的消耗视图（把三个「不参与计算」的坑收在一处） */
+export interface SiteBurn {
+  siteId: string;
+  /** 累计已用（无限额度站也有） */
+  spent?: string;
+  /** 距上一次观测的已用金额；没有上一次观测 → undefined */
+  recentSpent?: string;
+  /** `recentSpent` 覆盖的日历天数（1 = 就是「今日已用」） */
+  recentSpanDays: number;
+  /** 美元/天；null = 数据不足（**绝不是 0**） */
+  daily: number | null;
+  /** 预计剩余天数；null = 算不出 */
+  projectedDays: number | null;
+  /** 换算率未确认 → 数字可能差 1000 倍，一律不可信 */
+  unreliable: boolean;
+  /** 不参与速率计算的原因（UI 据此显示「数据不足」而不是数字） */
+  excludedReason?: 'manual' | 'unlimited' | 'rate-unconfirmed';
+}
+
+/**
+ * 单站消耗视图。三个「不参与计算」的坑在这里收口：
+ * - **手工值**不是实时数据 → 不算速率；
+ * - **无限额度**没有 remaining → 没有「还能用多久」，只显示已用；
+ * - **换算率未确认** → 数字可能差 1000 倍 → 标 `unreliable` 且**不给数字**。
+ */
+export function siteBurn(
+  snapshots: SnapshotStore,
+  site: RelaysSiteResult,
+  today: string,
+): SiteBurn {
+  const base: SiteBurn = { siteId: site.siteId, recentSpanDays: 0, daily: null, projectedDays: null, unreliable: false };
+  if (site.source === 'manual') return { ...base, excludedReason: 'manual' };
+  if (site.unlimited === true) {
+    return { ...base, spent: site.spent ?? site.total, excludedReason: 'unlimited' };
+  }
+  if (site.rateUnconfirmed === true) {
+    return { ...base, spent: site.spent, unreliable: true, excludedReason: 'rate-unconfirmed' };
+  }
+
+  const days = Object.keys(snapshots ?? {})
+    .filter((day) => day <= today)
+    .filter((day) => snapshots[day]?.[site.siteId] !== undefined)
+    .sort();
+  const lastDay: string | undefined = days.length > 0 ? days[days.length - 1] : undefined;
+  const prevDay: string | undefined = days.length > 1 ? days[days.length - 2] : undefined;
+  const lastEntry = lastDay === undefined ? undefined : snapshots[lastDay]?.[site.siteId];
+
+  let recentSpent: string | undefined;
+  let recentSpanDays = 0;
+  if (lastEntry?.spent !== undefined && prevDay !== undefined && lastDay !== undefined) {
+    const prevSpent = snapshots[prevDay]?.[site.siteId]?.spent;
+    if (prevSpent !== undefined) {
+      const delta = Number(lastEntry.spent) - Number(prevSpent);
+      const span = daysBetween(prevDay, lastDay);
+      if (Number.isFinite(delta) && span !== null && span > 0 && delta >= 0) {
+        recentSpent = delta.toFixed(2);
+        recentSpanDays = span;
+      }
+    }
+  }
+
+  const daily = computeBurnRate(snapshots, site.siteId, today);
+  return {
+    ...base,
+    spent: site.spent ?? lastEntry?.spent,
+    ...(recentSpent !== undefined ? { recentSpent } : {}),
+    recentSpanDays,
+    daily,
+    projectedDays: projectedDays(site.total, daily),
+  };
+}
+
+/** 全部站点的消耗视图（siteId → SiteBurn） */
+export function relaysBurnMap(view: RelaysView): Record<string, SiteBurn> {
+  const today = view.today ?? '';
+  const out: Record<string, SiteBurn> = {};
+  for (const site of view.sites) out[site.siteId] = siteBurn(view.snapshots ?? {}, site, today);
+  return out;
+}
+
+// ---------- 气泡里的消耗行（T11 展示层） ----------
+
+/**
+ * 单站的「今日已用 / 预计天数」两行。
+ *
+ * 口径：拿不到就显示「数据不足」，**绝不显示数字**（0 / ∞ 都是假数据）。
+ * 跨度 > 1 天时文案改成「近 N 天已用」—— 把 3 天前的用量说成"今日已用"是误导。
+ */
+export function burnRows(view: RelaysView, siteId: string, sym: string): BalanceBubbleRow[] {
+  const burn = relaysBurnMap(view)[siteId];
+  if (!burn) return [];
+  const rows: BalanceBubbleRow[] = [];
+  if (burn.recentSpent !== undefined) {
+    const label = burn.recentSpanDays <= 1 ? '今日已用 ' : `近 ${burn.recentSpanDays} 天已用 `;
+    rows.push({ role: 'sub', text: label + sym + burn.recentSpent });
+  }
+  if (burn.excludedReason === 'unlimited') return rows; // 无限额度：没有预计天数
+  if (burn.projectedDays !== null) {
+    rows.push({ role: 'sub', text: '预计还可使用 ' + Math.floor(burn.projectedDays) + ' 天' });
+  } else if (burn.excludedReason !== undefined) {
+    rows.push({ role: 'sub', text: burn.excludedReason === 'manual' ? '手工填写，无消耗统计' : '消耗数据不足' });
+  } else {
+    rows.push({ role: 'sub', text: '消耗数据不足（需连续观测 ' + BURN_MIN_SPAN_DAYS + ' 天以上）' });
+  }
+  return rows;
+}
+
+/** 舰队口径的消耗行：只汇总「算得出速率」的站，并如实说明有多少站算不出 */
+export function fleetBurnRows(view: RelaysView): BalanceBubbleRow[] {
+  const burns = relaysBurnMap(view);
+  const countable = view.sites.filter((s) => {
+    const b = burns[s.siteId];
+    return b !== undefined && b.daily !== null && b.projectedDays !== null;
+  });
+  if (countable.length === 0) return [];
+  // 预计天数取**最短**的那天：用户关心的是"最早哪个站会断"
+  let worst: { siteId: string; days: number } | null = null;
+  for (const site of countable) {
+    const days = burns[site.siteId].projectedDays;
+    if (days === null || days === undefined) continue;
+    if (worst === null || days < worst.days) worst = { siteId: site.siteId, days };
+  }
+  const rows: BalanceBubbleRow[] = [];
+  if (worst !== null) {
+    const name = view.sites.find((s) => s.siteId === worst.siteId)?.siteId ?? worst.siteId;
+    rows.push({ role: 'sub', text: `预计最短还可使用 ${Math.floor(worst.days)} 天（${name}）` });
+  }
+  const insufficient = view.sites.length - countable.length;
+  if (insufficient > 0) {
+    rows.push({ role: 'sub', text: insufficient + ' 站消耗数据不足' });
+  }
+  return rows;
 }

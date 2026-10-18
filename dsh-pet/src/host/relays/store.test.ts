@@ -10,6 +10,7 @@ import {
   FOCUS_FILE,
   MODELS_FILE,
   SITES_FILE,
+  SNAPSHOTS_FILE,
   clearCredential,
   clearFocus,
   getCredential,
@@ -19,9 +20,12 @@ import {
   putCredential,
   readFocus,
   readModelCache,
+  readSnapshots,
+  recordSnapshots,
   removeSite,
   saveSites,
   setSiteModels,
+  shiftDay,
   siteViews,
   toSiteView,
   upsertSite,
@@ -278,6 +282,79 @@ test('models 缓存：损坏的 models.json → 空缓存（可重新抓，不�
     assert.deepEqual(readModelCache(dir), {});
     setSiteModels(dir, 'x', [{ id: 'm' }]);
     assert.deepEqual(readModelCache(dir)['x'].models, [{ id: 'm' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- 每日余额快照（T11） ----------
+
+test('recordSnapshots：写入 + 同日合并（不是覆盖）', () => {
+  const dir = tmp();
+  try {
+    recordSnapshots(dir, '2026-10-18', { s1: { spent: '10.00', remaining: '50.00' } });
+    // 同一天再写另一个字段 → 合并，不是把整片替换掉
+    recordSnapshots(dir, '2026-10-18', { s1: { remaining: '48.00' } });
+    const snaps = readSnapshots(dir);
+    assert.deepEqual(snaps['2026-10-18'].s1, { spent: '10.00', remaining: '48.00' });
+    // 另一个站点互不影响
+    recordSnapshots(dir, '2026-10-18', { s2: { spent: '1.00' } });
+    assert.deepEqual(Object.keys(readSnapshots(dir)['2026-10-18']).sort(), ['s1', 's2']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('readSnapshots：文件损坏 → 空表，不抛错（派生数据）', () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, SNAPSHOTS_FILE), '{ this is not json');
+    assert.deepEqual(readSnapshots(dir), {});
+    // 形状不对（数组）同样按空处理
+    writeFileSync(join(dir, SNAPSHOTS_FILE), '[1,2,3]');
+    assert.deepEqual(readSnapshots(dir), {});
+    // 文件根本不存在 → 空表
+    rmSync(join(dir, SNAPSHOTS_FILE), { force: true });
+    assert.deepEqual(readSnapshots(dir), {});
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('recordSnapshots：超出保留窗口的旧日子被裁掉', () => {
+  const dir = tmp();
+  try {
+    // 先写 40 天前
+    recordSnapshots(dir, '2026-09-08', { s1: { spent: '1.00' } });
+    // 再写今天（keepDays 默认 30）→ 09-08 应被裁掉
+    recordSnapshots(dir, '2026-10-18', { s1: { spent: '2.00' } });
+    const snaps = readSnapshots(dir);
+    assert.equal('2026-09-08' in snaps, false, '超出窗口的旧日子必须裁掉');
+    assert.equal('2026-10-18' in snaps, true);
+    // 窗口边界：恰好 keepDays-1 天前的那天还在
+    recordSnapshots(dir, '2026-10-18', { s1: { spent: '3.00' } });
+    assert.equal('2026-09-19' in readSnapshots(dir), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('shiftDay：纯日期平移，跨月/跨年/闰日都按日历算', () => {
+  assert.equal(shiftDay('2026-10-18', -17), '2026-10-01');
+  assert.equal(shiftDay('2026-03-01', -1), '2026-02-28');
+  assert.equal(shiftDay('2024-03-01', -1), '2024-02-29', '闰年');
+  assert.equal(shiftDay('2026-01-01', -1), '2025-12-31', '跨年');
+  assert.equal(shiftDay('bad-day', 1), null, '非法键 → null，不猜');
+});
+
+test('recordSnapshots：keepDays 可注入（测试用小窗口）', () => {
+  const dir = tmp();
+  try {
+    recordSnapshots(dir, '2026-10-10', { s1: { spent: '1.00' } }, 3);
+    recordSnapshots(dir, '2026-10-18', { s1: { spent: '2.00' } }, 3);
+    const snaps = readSnapshots(dir);
+    assert.equal('2026-10-10' in snaps, false, '窗口 3 天 → 10-10 被裁');
+    assert.equal('2026-10-18' in snaps, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

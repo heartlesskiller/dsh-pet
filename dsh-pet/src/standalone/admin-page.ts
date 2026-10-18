@@ -143,6 +143,20 @@ export function renderAdminPage(): string {
   <div id="empty-hint" class="muted">还没有站点。先用上面「识别站点类型」确认类型，再「新增站点」。</div>
 </section>
 
+<section id="burn-section">
+  <h2>消耗与预计可用天数</h2>
+  <div class="row">
+    <button id="burn-load" type="button">刷新消耗统计</button>
+    <span id="burn-summary" class="muted"></span>
+  </div>
+  <div id="burn-hint" class="muted">按每日快照计算：需连续观测 3 天以上才有速率；拿不到就显示「数据不足」，<b>绝不显示 0 或 ∞</b>。无限额度站只显示已用。</div>
+  <div id="burn-error" class="err" hidden></div>
+  <table id="burn-table" class="mx" hidden>
+    <thead><tr><th>站点</th><th>今日已用</th><th>日均消耗</th><th>预计还可使用</th></tr></thead>
+    <tbody id="burn-rows"></tbody>
+  </table>
+</section>
+
 <section id="matrix-section">
   <h2>模型矩阵</h2>
   <div class="row">
@@ -441,7 +455,7 @@ export function renderAdminPage(): string {
       headRow.appendChild(th);
     });
 
-    var unknown = payload.unknownSiteCount || 0;
+    var unknown = typeof payload.unknownSiteCount === 'number' ? payload.unknownSiteCount : 0;
     $('matrix-summary').textContent =
       rows.length + ' 个模型 × ' + columns.length + ' 个站点' +
       (unknown > 0 ? '；' + unknown + ' 个站未抓取（未知 ≠ 没有）' : '');
@@ -472,6 +486,127 @@ export function renderAdminPage(): string {
       setError($('matrix-error'), '矩阵加载失败：' + (e && e.message ? e.message : String(e)));
       $('matrix-table').hidden = true;
     });
+  });
+
+  // ---- 消耗与预计可用天数（T11）----
+  // 算法与 src/shared/relays.ts 的 computeBurnRate / projectedDays 同口径（该处是权威实现，
+  // 有「1 天快照 → null」「断档不当 0」「无限额度 → null」等专项单测）。本页是纯字符串、
+  // 无法 import，表达式由 admin-page.test.ts 钉住。
+  var BURN_MIN_SPAN = 3;
+
+  /** 速率：数据不足 → null，**绝不是 0** */
+  function burnRate(snaps, siteId, today) {
+    var days = Object.keys(snaps || {}).filter(function (d) { return d <= today; })
+      .filter(function (d) {
+        var e = snaps[d] && snaps[d][siteId];
+        return e && typeof e.spent === 'string' && e.spent.length > 0;
+      }).sort();
+    if (days.length < 2) return null;
+    var span = daysBetween(days[0], days[days.length - 1]);
+    if (span === null || span < BURN_MIN_SPAN) return null;
+    var from = Number(snaps[days[0]][siteId].spent);
+    var to = Number(snaps[days[days.length - 1]][siteId].spent);
+    if (!isFinite(from) || !isFinite(to)) return null;
+    var burn = (to - from) / span;
+    return burn > 0 ? burn : null;
+  }
+
+  function daysBetween(a, b) {
+    var x = Date.parse(a + 'T00:00:00Z');
+    var y = Date.parse(b + 'T00:00:00Z');
+    if (!isFinite(x) || !isFinite(y)) return null;
+    return Math.round((y - x) / 86400000);
+  }
+
+  /** 预计天数：速率未知 / 无 remaining → null（不是 ∞、不是 0） */
+  function projectedDays(remaining, daily) {
+    if (daily === null || !(daily > 0)) return null;
+    if (remaining === null || remaining === undefined || remaining === '') return null;
+    var left = Number(remaining);
+    if (!isFinite(left)) return null;
+    return left <= 0 ? 0 : left / daily;
+  }
+
+  function renderBurn(list, state) {
+    var rowsBox = $('burn-rows');
+    var table = $('burn-table');
+    rowsBox.textContent = '';
+    setError($('burn-error'), '');
+    var relays = state && state.sections ? state.sections.relays : null;
+    var data = relays && relays.data ? relays.data : null;
+    if (!data || !Array.isArray(data.sites)) {
+      setError($('burn-error'), '还没有余额数据：先「刷新全部」，并确认有启用的站点。');
+      table.hidden = true;
+      return;
+    }
+    var snaps = data.snapshots || {};
+    var today = data.today || '';
+    var byId = {};
+    (list.sites || []).forEach(function (s) { byId[s.id] = s; });
+
+    var countable = 0;
+    data.sites.forEach(function (r) {
+      var site = byId[r.siteId] || { name: r.siteId };
+      var tr = document.createElement('tr');
+      var name = document.createElement('td');
+      name.textContent = site.name || r.siteId;
+      tr.appendChild(name);
+
+      var recent = document.createElement('td');
+      var dailyCell = document.createElement('td');
+      var proj = document.createElement('td');
+
+      if (r.ok !== true) {
+        recent.textContent = '查不到';
+        dailyCell.textContent = '—';
+        proj.textContent = '—';
+      } else if (r.unlimited === true) {
+        // 无限额度：只显示已用，**没有预计天数那一行**
+        recent.textContent = '已用 $' + (r.spent || (r.data && r.data.total) || '0');
+        dailyCell.textContent = '—';
+        proj.textContent = '无限额度';
+      } else if (r.source === 'manual') {
+        recent.textContent = '—';
+        dailyCell.textContent = '—';
+        proj.textContent = '手工填写，无消耗统计';
+      } else if (r.rateUnconfirmed === true) {
+        recent.textContent = '—';
+        dailyCell.textContent = '不可信';
+        proj.textContent = '换算率未确认，请核对';
+      } else {
+        var daily = burnRate(snaps, r.siteId, today);
+        var days = projectedDays(r.data && r.data.total, daily);
+        // 今日已用 = 今日累计 - 昨日累计
+        var keys = Object.keys(snaps).filter(function (d) { return d <= today && snaps[d][r.siteId]; }).sort();
+        var last = keys.length ? keys[keys.length - 1] : null;
+        var prev = keys.length > 1 ? keys[keys.length - 2] : null;
+        if (last && prev && snaps[last][r.siteId].spent !== undefined && snaps[prev][r.siteId].spent !== undefined) {
+          var delta = Number(snaps[last][r.siteId].spent) - Number(snaps[prev][r.siteId].spent);
+          var span = daysBetween(prev, last);
+          if (isFinite(delta) && span !== null && span > 0 && delta >= 0) {
+            recent.textContent = (span <= 1 ? '' : '近 ' + span + ' 天 ') + '$' + delta.toFixed(2);
+          } else { recent.textContent = '数据不足'; }
+        } else { recent.textContent = '数据不足'; }
+        dailyCell.textContent = daily === null ? '数据不足' : '$' + daily.toFixed(2) + '/天';
+        proj.textContent = days === null ? '数据不足' : Math.floor(days) + ' 天';
+        if (daily !== null && days !== null) countable += 1;
+      }
+      tr.appendChild(recent);
+      tr.appendChild(dailyCell);
+      tr.appendChild(proj);
+      rowsBox.appendChild(tr);
+    });
+    table.hidden = data.sites.length === 0;
+    $('burn-summary').textContent = data.sites.length + ' 站，其中 ' + countable + ' 站算得出预计天数';
+  }
+
+  $('burn-load').addEventListener('click', function () {
+    Promise.all([api('/relays', 'GET'), api('/state', 'GET').catch(function () { return null; })])
+      .then(function (out) { renderBurn(out[0] || {}, out[1] || {}); })
+      .catch(function (e) {
+        setError($('burn-error'), '加载失败：' + (e && e.message ? e.message : String(e)));
+        $('burn-table').hidden = true;
+      });
   });
 
   load();

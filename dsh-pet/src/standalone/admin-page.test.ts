@@ -63,6 +63,12 @@ const REQUIRED_MARKERS: Array<[string, string]> = [
   ['三态文案-有', "'有'"],
   ['三态文案-无', "'无'"],
   ['三态文案-未知', "'未知'"],
+  ['消耗统计区块', 'id="burn-section"'],
+  ['消耗统计表格', 'id="burn-table"'],
+  ['消耗统计行容器', 'id="burn-rows"'],
+  ['消耗统计按钮', 'id="burn-load"'],
+  ['数据不足文案', '数据不足'],
+  ['无限额度无预计天数', '无限额度'],
 ];
 
 /** 页面会调用的真实路由（少一个就说明页面在打 404） */
@@ -178,4 +184,32 @@ test('CSP 由 server 单独下发，且允许内联脚本（单文件零依赖�
 test('ADMIN_PAGE_PATH 与 server 用的路径一致（在 /dsh-pet-7340 前缀之外）', () => {
   assert.equal(ADMIN_PAGE_PATH, '/admin');
   assert.equal(ADMIN_PAGE_PATH.startsWith('/dsh-pet-7340'), false, '管理页不该占插件 API 前缀');
+});
+
+// ---------- 消耗速率（T11）：与 shared/relays.ts 同口径，防漂移 ----------
+
+test('消耗速率表达式与 shared/relays.ts 的 computeBurnRate 同口径（防漂移）', () => {
+  const html = renderAdminPage();
+  // 坑 1：只有 1 天快照 → null，绝不是 0
+  assert.ok(html.includes('if (days.length < 2) return null;'), '1 天快照必须返回 null');
+  // 坑 2：跨度不足 3 天 → null（断档不当 0 消耗）
+  assert.ok(html.includes('span < BURN_MIN_SPAN) return null;'), '跨度不足必须判数据不足');
+  assert.ok(html.includes('var BURN_MIN_SPAN = 3;'));
+  // 速率必须 > 0 才算（负速率 = 充值过，对"还能用多久"没意义）
+  assert.ok(html.includes('return burn > 0 ? burn : null;'), '负速率必须返回 null');
+  // 坑 3：无限额度站没有预计天数那一行
+  assert.ok(html.includes('无限额度'), '无限额度站只显示已用');
+  // 坑 5：手工值不参与速率计算
+  assert.ok(html.includes('手工填写，无消耗统计'));
+  // 坑 4：换算率未确认不给数字
+  assert.ok(html.includes('换算率未确认，请核对'));
+});
+
+test('消耗统计：拿不到就显示「数据不足」，绝不显示 0 或 ∞', () => {
+  const html = renderAdminPage();
+  assert.ok(html.includes('数据不足'));
+  // 不得出现把 null 当 0 / Infinity 的写法
+  assert.equal(html.includes('|| 0'), false, '不得用 || 0 兜底（会把 null 变成 0）');
+  assert.equal(/Infinity/.test(html), false, '不得出现 Infinity');
+  assert.equal(html.includes('daily === null ? \'数据不足\''), true, '速率未知必须显示数据不足');
 });

@@ -28,7 +28,14 @@ import type * as ReactNS from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
 import { fetchState } from '../shared/state';
-import { readModelMatrix, type MatrixCellState, type RelaysModelMatrix } from '../shared/relays';
+import {
+  readModelMatrix,
+  readRelays,
+  relaysBurnMap,
+  type MatrixCellState,
+  type RelaysModelMatrix,
+  type SiteBurn,
+} from '../shared/relays';
 
 // ---------- 契约镜像（API.md §5 / openapi.yaml 的 /relays schema） ----------
 // client 半侧不跨层 import 宿主代码（host 依赖 node:fs 等，浏览器产物里解析不到）；
@@ -895,6 +902,20 @@ export const zh: Record<string, string> = {
   modelsBtn: '抓模型',
   modelsOk: '已抓取 {count} 个模型。',
   modelsFail: '模型抓取失败',
+  burnTitle: '消耗与预计可用天数',
+  burnLoad: '刷新消耗统计',
+  burnLoading: '统计中…',
+  burnHint: '按每日快照计算：需连续观测 3 天以上才有速率；拿不到就显示「数据不足」，绝不显示 0 或 ∞。无限额度站只显示已用。',
+  burnColSite: '站点',
+  burnColToday: '今日已用',
+  burnColDaily: '日均消耗',
+  burnColProjected: '预计还可使用',
+  burnInsufficient: '数据不足',
+  burnUnlimited: '无限额度',
+  burnManual: '手工填写，无消耗统计',
+  burnUnreliable: '换算率未确认，请核对',
+  burnSummary: '{countable}/{total} 站算得出预计天数',
+  burnFail: '消耗统计加载失败',
   matrixTitle: '模型矩阵',
   matrixLoad: '加载矩阵',
   matrixLoading: '加载中…',
@@ -1053,6 +1074,21 @@ export const en: Record<string, string> = {
   modelsBtn: 'Models',
   modelsOk: 'Fetched {count} models.',
   modelsFail: 'Model fetch failed',
+  burnTitle: 'Usage & projected days',
+  burnLoad: 'Refresh usage',
+  burnLoading: 'Computing…',
+  burnHint:
+    'Computed from daily snapshots: a rate needs 3+ days of observation; when unavailable it says "insufficient data" — never 0 or ∞. Unlimited sites show usage only.',
+  burnColSite: 'Site',
+  burnColToday: 'Used today',
+  burnColDaily: 'Daily burn',
+  burnColProjected: 'Projected days left',
+  burnInsufficient: 'Insufficient data',
+  burnUnlimited: 'Unlimited',
+  burnManual: 'Manual entry — no usage stats',
+  burnUnreliable: 'Rate unconfirmed — please verify',
+  burnSummary: '{countable}/{total} sites have a projection',
+  burnFail: 'Usage stats failed to load',
   matrixTitle: 'Model matrix',
   matrixLoad: 'Load matrix',
   matrixLoading: 'Loading…',
@@ -1263,6 +1299,9 @@ export function makeRelaysAdminSection(
     const [detectBusy, setDetectBusy] = useState(false);
     // 模型矩阵：三态（有 / 无 / 未知）。**未知 ≠ 无** —— 渲染必须可区分，绝不猜成"没有"
     const [matrix, setMatrix] = useState<RelaysModelMatrix | null>(null);
+    // T11 消耗统计：今日已用 / 日均 / 预计天数。**数据不足就显示"数据不足"，绝不显示 0 或 ∞**
+    const [burn, setBurn] = useState<Record<string, SiteBurn>>({});
+    const [burnBusy, setBurnBusy] = useState(false);
     const [matrixBusy, setMatrixBusy] = useState(false);
     const [matrixErr, setMatrixErr] = useState<string>('');
     const [testMsg, setTestMsg] = useState<{ kind: 'ok' | 'err' | ''; text: string }>({ kind: '', text: '' });
@@ -1375,6 +1414,34 @@ export function makeRelaysAdminSection(
         setMsg({ kind: 'err', text: t('modelsFail') + '：' + (e instanceof Error ? e.message : String(e)) });
       } finally {
         setBusy(null);
+      }
+    };
+
+    /**
+     * 加载消耗统计（T11）。
+     *
+     * 数据来自 `/state` 的 `sections.relays` 叶（host 已把 `today` + 快照窗口下发），
+     * 速率/预计天数用 shared/relays.ts 的纯函数现算 —— **算法只有一份**，这里不重算。
+     * 时钟由 host 下发（`today`），客户端不自己取，避免两端漂移。
+     */
+    const loadBurn = async (): Promise<void> => {
+      setBurnBusy(true);
+      try {
+        const state = await fetchState('/dsh-pet-7340/state');
+        const data = state?.sections?.relays?.data;
+        const view = readRelays(data);
+        if (view === null) {
+          setBurn({});
+          setMsg({ kind: 'err', text: t('burnFail') + '：暂无余额数据（先刷新全部）' });
+          return;
+        }
+        setBurn(relaysBurnMap(view));
+        setMsg({ kind: '', text: '' });
+      } catch (e) {
+        setBurn({});
+        setMsg({ kind: 'err', text: t('burnFail') + '：' + (e instanceof Error ? e.message : String(e)) });
+      } finally {
+        setBurnBusy(false);
       }
     };
 
@@ -1913,6 +1980,104 @@ export function makeRelaysAdminSection(
       ] });
     };
 
+    /**
+     * 消耗与预计可用天数（T11 展示层）。
+     *
+     * 口径（与 shared/relays.ts 的纯函数一一对应，**不在这里重算**）：
+     * - 数据不足 → 显示「数据不足」，**绝不显示 0 或 ∞**（那两个都是假数据）；
+     * - 无限额度站 → 只显示已用，**没有预计天数**；
+     * - 手工值 / 换算率未确认 → 不参与速率计算，明说原因。
+     */
+    const burnNode = (): ReturnType<typeof h> => {
+      const head = h('div', {
+        key: 'head',
+        className: 'dsh-pet-ra__cardHead',
+        children: [
+          h('span', { key: 't', className: 'dsh-pet-ra__cardTitle', children: t('burnTitle') }),
+          h('div', {
+            key: 'acts',
+            className: 'dsh-pet-ra__cardActs',
+            children: [
+              h('button', {
+                key: 'load',
+                type: 'button',
+                className: 'dsh-pet-ra__btn is-sm',
+                disabled: burnBusy,
+                onClick: () => void loadBurn(),
+                children: burnBusy ? t('burnLoading') : t('burnLoad'),
+              }),
+            ],
+          }),
+        ],
+      });
+
+      const entries = Object.entries(burn);
+      const countable = entries.filter(([, b]) => b.daily !== null && b.projectedDays !== null).length;
+      const summary = t('burnSummary')
+        .replace('{countable}', String(countable))
+        .replace('{total}', String(entries.length));
+
+      const cellText = (b: SiteBurn): { today: string; daily: string; projected: string } => {
+        if (b.excludedReason === 'unlimited') {
+          return { today: '已用 $' + (b.spent ?? '-'), daily: '—', projected: t('burnUnlimited') };
+        }
+        if (b.excludedReason === 'manual') return { today: '—', daily: '—', projected: t('burnManual') };
+        if (b.excludedReason === 'rate-unconfirmed') {
+          return { today: '—', daily: t('burnUnreliable'), projected: t('burnUnreliable') };
+        }
+        const today =
+          b.recentSpent === undefined
+            ? t('burnInsufficient')
+            : (b.recentSpanDays <= 1 ? '' : '近 ' + b.recentSpanDays + ' 天 ') + '$' + b.recentSpent;
+        return {
+          today,
+          daily: b.daily === null ? t('burnInsufficient') : '$' + b.daily.toFixed(2) + '/天',
+          projected: b.projectedDays === null ? t('burnInsufficient') : Math.floor(b.projectedDays) + ' 天',
+        };
+      };
+
+      return h('div', { key: 'burn', className: 'dsh-pet-ra__card', children: [
+        head,
+        h('div', { key: 'sum', className: 'dsh-pet-ra__note', children: summary }),
+        entries.length === 0
+          ? h('p', { key: 'hint', className: 'dsh-pet-ra__note', children: t('burnHint') })
+          : h('table', {
+              key: 'tbl',
+              className: 'dsh-pet-ra__mxTable',
+              children: [
+                h('thead', {
+                  key: 'th',
+                  children: h('tr', {
+                    children: [
+                      h('th', { key: 's', children: t('burnColSite') }),
+                      h('th', { key: 't', children: t('burnColToday') }),
+                      h('th', { key: 'd', children: t('burnColDaily') }),
+                      h('th', { key: 'p', children: t('burnColProjected') }),
+                    ],
+                  }),
+                }),
+                h('tbody', {
+                  key: 'tb',
+                  children: entries.map(([siteId, b]) => {
+                    const c = cellText(b);
+                    const site = sites.find((x) => x.id === siteId);
+                    return h('tr', {
+                      key: siteId,
+                      children: [
+                        h('td', { key: 's', children: site?.name ?? siteId }),
+                        h('td', { key: 't', children: c.today }),
+                        h('td', { key: 'd', children: c.daily }),
+                        h('td', { key: 'p', children: c.projected }),
+                      ],
+                    });
+                  }),
+                }),
+              ],
+            }),
+        h('p', { key: 'hint', className: 'dsh-pet-ra__note', children: t('burnHint') }),
+      ] });
+    };
+
     const detectNode = (key = 'detect'): ReturnType<typeof h> | null => {
       if (detectBusy) return h('div', { key, className: 'dsh-pet-ra__detect', children: t('detecting') });
       const decision = decideDetect(detect);
@@ -2433,6 +2598,8 @@ export function makeRelaysAdminSection(
               ],
             })
           : null,
+
+        burnNode(),
 
         // 模型矩阵（T03 展示层）：行 = 全部站点模型并集，格子三态。
         // **未知 ≠ 无**：没抓过的站渲染成"未知"（琥珀底），绝不与"无"（灰）混同。

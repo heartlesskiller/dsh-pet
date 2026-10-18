@@ -45,6 +45,16 @@ export const FOCUS_FILE = 'focus.json';
  * 读坏时不抛错、不改名留存（坏缓存 = 重新抓一次，不是数据丢失）。
  */
 export const MODELS_FILE = 'models.json';
+/**
+ * 每日余额快照文件（`YYYY-MM-DD`（**本地时区**）→ siteId → {spent, remaining, unlimited}）。
+ *
+ * 派生数据、可整体重建 —— 与 models.json 同口径：**读坏不抛错、不改名留存**
+ * （坏快照 = 消耗速率暂时算不出，不是数据丢失）。消耗速率与预计天数的算法在
+ * `src/shared/relays.ts`（两端共用一份），这里只负责持久化。
+ */
+export const SNAPSHOTS_FILE = 'snapshots.json';
+/** 快照保留天数。同时是下发到 `/state` 的窗口 —— 1s 轮询的 payload 不能无限增长 */
+export const SNAPSHOT_KEEP_DAYS = 30;
 
 /**
  * 带 `cause` 的 Error。
@@ -280,6 +290,79 @@ export function clearFocus(dir: string): void {
 }
 
 // ---------- 模型清单缓存（T03：按需抓取，GET 只读） ----------
+
+// ---------- 每日余额快照（T11：消耗速率的数据源） ----------
+
+/** 一天的快照：siteId → 该站当天的累计数据 */
+export interface DaySnapshotEntry {
+  /** 累计已用金额（不是当日增量） */
+  spent?: string;
+  /** 当日剩余金额 */
+  remaining?: string;
+  /** 无限额度站 */
+  unlimited?: boolean;
+}
+
+/** 一天的快照表 */
+export type DaySnapshots = Record<string, DaySnapshotEntry>;
+
+/** 全部快照：`YYYY-MM-DD`（本地时区）→ 当天各站数据 */
+export type SnapshotStore = Record<string, DaySnapshots>;
+
+/** 读快照。损坏/形状不对 → 空表（派生数据，不抛错、不改名留存） */
+export function readSnapshots(dir: string): SnapshotStore {
+  let raw: unknown;
+  try {
+    if (!existsSync(join(dir, SNAPSHOTS_FILE))) return {};
+    raw = JSON.parse(readFileSync(join(dir, SNAPSHOTS_FILE), 'utf8'));
+  } catch {
+    return {};
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return raw as SnapshotStore;
+}
+
+/** 写快照（原子写） */
+export function writeSnapshots(dir: string, snapshots: SnapshotStore): void {
+  writeJsonAtomic(join(dir, SNAPSHOTS_FILE), snapshots);
+}
+
+/**
+ * 纯日期平移：`YYYY-MM-DD` ± n 天（UTC 运算，避免本地时区把日期算偏）。
+ * 不读时钟 —— 调用方给基准日。
+ */
+export function shiftDay(day: string, deltaDays: number): string | null {
+  const t = Date.parse(`${day}T00:00:00Z`);
+  if (!Number.isFinite(t)) return null;
+  return new Date(t + deltaDays * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * 记录某一天各站的快照，并裁掉超出保留窗口的旧日子。
+ *
+ * 同一天重复调用是**合并**（不是覆盖）：余额刷新与健康探测可能在不同时刻各写一部分字段。
+ * @param day 本地时区的 `YYYY-MM-DD`
+ */
+export function recordSnapshots(
+  dir: string,
+  day: string,
+  entries: DaySnapshots,
+  keepDays: number = SNAPSHOT_KEEP_DAYS,
+): SnapshotStore {
+  const snapshots = readSnapshots(dir);
+  const merged: DaySnapshots = { ...(snapshots[day] ?? {}) };
+  for (const [siteId, entry] of Object.entries(entries)) {
+    merged[siteId] = { ...(merged[siteId] ?? {}), ...entry };
+  }
+  snapshots[day] = merged;
+  // 裁窗口：日键是 `YYYY-MM-DD`，字典序即时间序，直接比字符串
+  const cutoff = shiftDay(day, -(keepDays - 1));
+  for (const key of Object.keys(snapshots)) {
+    if (cutoff !== null && key < cutoff) delete snapshots[key];
+  }
+  writeSnapshots(dir, snapshots);
+  return snapshots;
+}
 
 /** 读模型缓存。损坏/形状不对 → 空缓存（派生数据，不抛错、不改名留存） */
 export function readModelCache(dir: string): RelayModelCache {
