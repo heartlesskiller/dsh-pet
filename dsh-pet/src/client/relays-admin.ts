@@ -28,6 +28,7 @@ import type * as ReactNS from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
 import { fetchState } from '../shared/state';
+import { readModelMatrix, type MatrixCellState, type RelaysModelMatrix } from '../shared/relays';
 
 // ---------- 契约镜像（API.md §5 / openapi.yaml 的 /relays schema） ----------
 // client 半侧不跨层 import 宿主代码（host 依赖 node:fs 等，浏览器产物里解析不到）；
@@ -632,6 +633,8 @@ export interface RelaysAdminApi {
   focus(siteId: string | null): Promise<string | null>;
   manualBalance(id: string, amount: string, currency: string): Promise<RelaySiteAdminView>;
   fetchModels(id: string): Promise<{ count: number; source: string }>;
+  /** 模型矩阵（GET /relays/models）。矩阵本身由 host 算好，这里只解析不重算 */
+  fetchModelMatrix(): Promise<RelaysModelMatrix | null>;
 }
 
 export function makeRelaysAdminApi(base: string): RelaysAdminApi {
@@ -685,6 +688,11 @@ export function makeRelaysAdminApi(base: string): RelaysAdminApi {
       }
       const models = Array.isArray(d?.models) ? d.models : [];
       return { count: models.length, source: asStr(d?.source) ?? '' };
+    },
+    fetchModelMatrix: async () => {
+      const d = await req<unknown>(at('/models'));
+      // 形状不符 → null（与 readRelays 同口径：不抛，交给 UI 显示"加载失败"）
+      return readModelMatrix(d);
     },
   };
 }
@@ -751,6 +759,16 @@ const RELAYS_ADMIN_CSS = [
   '.dsh-pet-ra__focus{display:flex;gap:8px;flex-wrap:wrap;align-items:center}',
   '.dsh-pet-ra__banner{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--dsw-alias-state-error-secondary);border-radius:10px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}',
   '.dsh-pet-ra__detect{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
+  // 模型矩阵：三态必须**视觉可区分**（未知 ≠ 无，用户会据格子判断"这站没我要的模型"）
+  '.dsh-pet-ra__mxTable{width:100%;border-collapse:collapse;font-size:12px;line-height:18px;margin-top:8px}',
+  '.dsh-pet-ra__mxTable th,.dsh-pet-ra__mxTable td{padding:4px 8px;border-bottom:1px solid var(--dsw-alias-border-l1);text-align:left;vertical-align:middle}',
+  '.dsh-pet-ra__mxTable th{font-weight:500;color:var(--dsw-alias-label-secondary);white-space:nowrap}',
+  '.dsh-pet-ra__mxModel{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap}',
+  '.dsh-pet-ra__mxCell{display:inline-block;min-width:22px;padding:1px 7px;border-radius:6px;text-align:center;font-weight:600}',
+  '.dsh-pet-ra__mxCell.is-yes{color:var(--dsw-alias-state-success-primary);background:var(--dsw-alias-state-success-secondary)}',
+  '.dsh-pet-ra__mxCell.is-no{color:var(--dsw-alias-label-tertiary);background:transparent;font-weight:400}',
+  // 未知：琥珀底 + 问号，与"无"（灰、无底）明确区分
+  '.dsh-pet-ra__mxCell.is-unknown{color:var(--dsw-alias-state-warning-primary,#b45309);background:var(--dsw-alias-state-warning-secondary,#fef3c7)}',
   '.dsh-pet-ra__detect ul{margin:0;padding-left:18px}',
   '.dsh-pet-ra__detect.is-unknown{color:var(--dsw-alias-state-error-primary)}',
   '.dsh-pet-ra__empty{margin:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-tertiary)}',
@@ -877,6 +895,22 @@ export const zh: Record<string, string> = {
   modelsBtn: '抓模型',
   modelsOk: '已抓取 {count} 个模型。',
   modelsFail: '模型抓取失败',
+  matrixTitle: '模型矩阵',
+  matrixLoad: '加载矩阵',
+  matrixLoading: '加载中…',
+  matrixHint: '行 = 全部站点的模型并集。「有」= 该站有；「无」= 抓过、确认没有；「未知」= 没抓过（不是没有）。想补哪列就在该站点行上点「抓模型」。',
+  matrixColModel: '模型',
+  matrixSummary: '{models} 个模型 × {sites} 个站点',
+  matrixUnknownSites: '{count} 个站未抓取（未知 ≠ 没有）',
+  matrixEmpty: '还没有抓过任何模型：先在站点行上点「抓模型」。',
+  matrixBad: '矩阵数据形状不符（host 返回异常）',
+  matrixFail: '矩阵加载失败',
+  'matrix.mark.yes': '有',
+  'matrix.mark.no': '无',
+  'matrix.mark.unknown': '未知',
+  'matrix.state.yes': '该站有這個模型',
+  'matrix.state.no': '抓过，确认没有',
+  'matrix.state.unknown': '没抓过 = 未知（不是没有）',
   setFocus: '设为焦点',
   clearFocus: '取消焦点（回全舰队）',
   credNone: '无凭证',
@@ -1019,6 +1053,23 @@ export const en: Record<string, string> = {
   modelsBtn: 'Models',
   modelsOk: 'Fetched {count} models.',
   modelsFail: 'Model fetch failed',
+  matrixTitle: 'Model matrix',
+  matrixLoad: 'Load matrix',
+  matrixLoading: 'Loading…',
+  matrixHint:
+    'Rows = the union of models across all sites. "Yes" = this site has it; "No" = fetched and confirmed absent; "Unknown" = never fetched (not the same as absent). Use "Models" on a site row to fill a column.',
+  matrixColModel: 'Model',
+  matrixSummary: '{models} models × {sites} sites',
+  matrixUnknownSites: '{count} site(s) never fetched (unknown ≠ absent)',
+  matrixEmpty: 'No models fetched yet — use "Models" on a site row first.',
+  matrixBad: 'Matrix payload shape is invalid (host returned something unexpected)',
+  matrixFail: 'Matrix load failed',
+  'matrix.mark.yes': 'Yes',
+  'matrix.mark.no': 'No',
+  'matrix.mark.unknown': '?',
+  'matrix.state.yes': 'This site has this model',
+  'matrix.state.no': 'Fetched — confirmed absent',
+  'matrix.state.unknown': 'Never fetched = unknown (not absent)',
   setFocus: 'Set as focus',
   clearFocus: 'Clear focus (back to fleet)',
   credNone: 'No credential',
@@ -1210,6 +1261,10 @@ export function makeRelaysAdminSection(
     const [manualTouched, setManualTouched] = useState(false);
     const [detect, setDetect] = useState<RelayDetectInfo | null>(null);
     const [detectBusy, setDetectBusy] = useState(false);
+    // 模型矩阵：三态（有 / 无 / 未知）。**未知 ≠ 无** —— 渲染必须可区分，绝不猜成"没有"
+    const [matrix, setMatrix] = useState<RelaysModelMatrix | null>(null);
+    const [matrixBusy, setMatrixBusy] = useState(false);
+    const [matrixErr, setMatrixErr] = useState<string>('');
     const [testMsg, setTestMsg] = useState<{ kind: 'ok' | 'err' | ''; text: string }>({ kind: '', text: '' });
     const [testBusy, setTestBusy] = useState(false);
 
@@ -1320,6 +1375,26 @@ export function makeRelaysAdminSection(
         setMsg({ kind: 'err', text: t('modelsFail') + '：' + (e instanceof Error ? e.message : String(e)) });
       } finally {
         setBusy(null);
+      }
+    };
+
+    /** 加载模型矩阵。矩阵由 host 一次算好，这里只解析 + 渲染（不重算） */
+    const loadMatrix = async (): Promise<void> => {
+      setMatrixBusy(true);
+      setMatrixErr('');
+      try {
+        const m = await api.fetchModelMatrix();
+        if (m === null) {
+          setMatrixErr(t('matrixBad'));
+          setMatrix(null);
+          return;
+        }
+        setMatrix(m);
+      } catch (e) {
+        setMatrixErr(t('matrixFail') + '：' + (e instanceof Error ? e.message : String(e)));
+        setMatrix(null);
+      } finally {
+        setMatrixBusy(false);
       }
     };
 
@@ -1732,6 +1807,110 @@ export function makeRelaysAdminSection(
           }),
         ],
       });
+    };
+
+    /**
+     * 模型矩阵视图（T03 展示层）。
+     *
+     * 三态语义硬要求：`unknown`（没抓过）与 `no`（抓过确认没有）**必须视觉可区分** ——
+     * 用户会据格子判断"这站没我要的模型"，把未知演成"没有"就是误导。
+     * 状态分类统一走 shared/relays.ts 的 matrixCellState（两端共用、有专项单测），
+     * 这里只做渲染，不重算矩阵。
+     */
+    const matrixNode = (): ReturnType<typeof h> => {
+      const head = h('div', {
+        key: 'head',
+        className: 'dsh-pet-ra__cardHead',
+        children: [
+          h('span', { key: 't', className: 'dsh-pet-ra__cardTitle', children: t('matrixTitle') }),
+          h('div', {
+            key: 'acts',
+            className: 'dsh-pet-ra__cardActs',
+            children: [
+              h('button', {
+                key: 'load',
+                type: 'button',
+                className: 'dsh-pet-ra__btn is-sm',
+                disabled: matrixBusy,
+                onClick: () => void loadMatrix(),
+                children: matrixBusy ? t('matrixLoading') : t('matrixLoad'),
+              }),
+            ],
+          }),
+        ],
+      });
+
+      if (matrix === null) {
+        return h('div', { key: 'matrix', className: 'dsh-pet-ra__card', children: [
+          head,
+          h('p', { key: 'hint', className: 'dsh-pet-ra__note', children: t('matrixHint') }),
+          matrixErr.length > 0
+            ? h('p', { key: 'err', className: 'dsh-pet-ra__banner', role: 'alert', children: matrixErr })
+            : null,
+        ] });
+      }
+
+      // 站点列：从矩阵行里收集（host 已按站点名排序，这里只去重保序）
+      const columns: Array<{ siteId: string; name: string }> = [];
+      for (const row of matrix.rows) {
+        for (const cell of row.cells) {
+          if (!columns.some((c) => c.siteId === cell.siteId)) columns.push({ siteId: cell.siteId, name: cell.name });
+        }
+      }
+
+      const cellNode = (state: MatrixCellState): ReturnType<typeof h> =>
+        h('span', {
+          className: 'dsh-pet-ra__mxCell is-' + state,
+          title: t('matrix.state.' + state),
+          'aria-label': t('matrix.state.' + state),
+          children: t('matrix.mark.' + state),
+        });
+
+      const table = h('table', {
+        key: 'tbl',
+        className: 'dsh-pet-ra__mxTable',
+        children: [
+          h('thead', {
+            key: 'th',
+            children: h('tr', {
+              children: [
+                h('th', { key: 'm', children: t('matrix.colModel') }),
+                ...columns.map((c) => h('th', { key: c.siteId, children: c.name })),
+              ],
+            }),
+          }),
+          h('tbody', {
+            key: 'tb',
+            children: matrix.rows.map((row) =>
+              h('tr', {
+                key: row.id,
+                children: [
+                  h('td', { key: 'm', className: 'dsh-pet-ra__mxModel', children: row.id }),
+                  ...columns.map((c) => {
+                    const cell = row.cells.find((x) => x.siteId === c.siteId);
+                    return h('td', { key: c.siteId, children: cellNode(cell?.state ?? 'unknown') });
+                  }),
+                ],
+              }),
+            ),
+          }),
+        ],
+      });
+
+      const summary =
+        t('matrixSummary')
+          .replace('{models}', String(matrix.rows.length))
+          .replace('{sites}', String(columns.length)) +
+        (matrix.unknownSiteCount > 0 ? '　' + t('matrixUnknownSites').replace('{count}', String(matrix.unknownSiteCount)) : '');
+
+      return h('div', { key: 'matrix', className: 'dsh-pet-ra__card', children: [
+        head,
+        h('div', { key: 'sum', className: 'dsh-pet-ra__note', children: summary }),
+        matrix.rows.length === 0
+          ? h('p', { key: 'empty', className: 'dsh-pet-ra__empty', children: t('matrixEmpty') })
+          : table,
+        h('p', { key: 'hint', className: 'dsh-pet-ra__note', children: t('matrixHint') }),
+      ] });
     };
 
     const detectNode = (key = 'detect'): ReturnType<typeof h> | null => {
@@ -2254,6 +2433,10 @@ export function makeRelaysAdminSection(
               ],
             })
           : null,
+
+        // 模型矩阵（T03 展示层）：行 = 全部站点模型并集，格子三态。
+        // **未知 ≠ 无**：没抓过的站渲染成"未知"（琥珀底），绝不与"无"（灰）混同。
+        matrixNode(),
 
         editing !== null ? formNode() : null,
 

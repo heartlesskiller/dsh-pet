@@ -62,6 +62,14 @@ export function renderAdminPage(): string {
   .muted { color: #9ca3af; }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
   .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  /* 模型矩阵三态：必须视觉可区分 —— 未知（琥珀底）≠ 无（灰、无底） */
+  .mx { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  .mx th, .mx td { padding: 5px 8px; border-bottom: 1px solid #eef0f3; text-align: left; vertical-align: middle; }
+  .mx th { color: #6b7280; font-weight: 500; white-space: nowrap; }
+  .cell { display: inline-block; min-width: 24px; padding: 1px 8px; border-radius: 6px; text-align: center; font-weight: 600; }
+  .cell-yes { color: #047857; background: #ecfdf5; }
+  .cell-no { color: #9ca3af; background: transparent; font-weight: 400; }
+  .cell-unknown { color: #b45309; background: #fffbeb; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -133,6 +141,20 @@ export function renderAdminPage(): string {
     <tbody id="site-rows"></tbody>
   </table>
   <div id="empty-hint" class="muted">还没有站点。先用上面「识别站点类型」确认类型，再「新增站点」。</div>
+</section>
+
+<section id="matrix-section">
+  <h2>模型矩阵</h2>
+  <div class="row">
+    <button id="matrix-load" type="button">加载矩阵</button>
+    <span id="matrix-summary" class="muted"></span>
+  </div>
+  <div id="matrix-hint" class="muted">行 = 全部站点的模型并集。「有」= 该站有；「无」= 抓过、确认没有；<b>「未知」= 没抓过（不是没有）</b>。想补哪列就在该站点行上点「模型」。</div>
+  <div id="matrix-error" class="err" hidden></div>
+  <table id="matrix-table" class="mx" hidden>
+    <thead><tr id="matrix-head-row"><th>模型</th></tr></thead>
+    <tbody id="matrix-rows"></tbody>
+  </table>
 </section>
 
 <script>
@@ -380,6 +402,76 @@ export function renderAdminPage(): string {
       if (d.needManualConfirm) lines.push('需要你手动确认类型（识别不了就不猜）');
       box.textContent = lines.join(' | ');
     }).catch(function (e) { $('detect-result').textContent = '识别失败：' + e.message; });
+  });
+
+  // ---- 模型矩阵（三态：有 / 无 / 未知；未知 ≠ 无）----
+  // 与 src/shared/relays.ts 的 matrixCellState 保持一致：该处是唯一权威实现，并有
+  // 「null 必须与 false 区分」的专项单测；本页是纯字符串、无法 import，分类表达式由
+  // admin-page.test.ts 钉住，改坏会红。
+  var CELL_TEXT = { yes: '有', no: '无', unknown: '未知' };
+  function cellState(v) { return v === true ? 'yes' : v === false ? 'no' : 'unknown'; }
+
+  function renderMatrix(payload) {
+    var headRow = $('matrix-head-row');
+    var rowsBox = $('matrix-rows');
+    var table = $('matrix-table');
+    // 清掉旧列（保留第一个「模型」列头）
+    while (headRow.children.length > 1) headRow.removeChild(headRow.lastChild);
+    rowsBox.textContent = '';
+    setError($('matrix-error'), '');
+
+    if (!payload || payload.ok !== true || !Array.isArray(payload.rows)) {
+      setError($('matrix-error'), '矩阵数据形状不符（host 返回异常）');
+      table.hidden = true;
+      return;
+    }
+    var rows = payload.rows;
+    // 站点列：从矩阵行里收集（host 已按站点名排序，这里只去重保序，不重算）
+    var columns = [];
+    rows.forEach(function (r) {
+      (r.sites || []).forEach(function (c) {
+        if (!columns.some(function (x) { return x.siteId === c.siteId; })) {
+          columns.push({ siteId: c.siteId, name: c.name || c.siteId });
+        }
+      });
+    });
+    columns.forEach(function (c) {
+      var th = document.createElement('th');
+      th.textContent = c.name;
+      headRow.appendChild(th);
+    });
+
+    var unknown = payload.unknownSiteCount || 0;
+    $('matrix-summary').textContent =
+      rows.length + ' 个模型 × ' + columns.length + ' 个站点' +
+      (unknown > 0 ? '；' + unknown + ' 个站未抓取（未知 ≠ 没有）' : '');
+
+    rows.forEach(function (r) {
+      var tr = document.createElement('tr');
+      var name = document.createElement('td');
+      name.className = 'mono';
+      name.textContent = r.id;
+      tr.appendChild(name);
+      columns.forEach(function (c) {
+        var cell = (r.sites || []).filter(function (x) { return x.siteId === c.siteId; })[0];
+        var td = document.createElement('td');
+        var st = cellState(cell ? cell.available : null);
+        td.textContent = CELL_TEXT[st];
+        td.className = 'cell cell-' + st;
+        td.title = st === 'yes' ? '该站有这个模型' : st === 'no' ? '抓过，确认没有' : '没抓过 = 未知（不是没有）';
+        tr.appendChild(td);
+      });
+      rowsBox.appendChild(tr);
+    });
+    table.hidden = rows.length === 0;
+    if (rows.length === 0) $('matrix-hint').textContent = '还没有抓过任何模型：先在站点行上点「模型」。';
+  }
+
+  $('matrix-load').addEventListener('click', function () {
+    api('/relays/models', 'GET').then(renderMatrix).catch(function (e) {
+      setError($('matrix-error'), '矩阵加载失败：' + (e && e.message ? e.message : String(e)));
+      $('matrix-table').hidden = true;
+    });
   });
 
   load();

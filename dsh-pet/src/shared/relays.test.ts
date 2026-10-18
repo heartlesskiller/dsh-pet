@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  matrixCellState,
+  readModelMatrix,
   readRelays,
   relaysAlertKey,
   relaysBalanceState,
@@ -233,4 +235,110 @@ test('通配证明：sections.relays 的 counter 变化被 takeChanged 捕获（
   const view = readRelays(changed[0].leaf.data);
   assert.ok(view);
   assert.equal(view.summary.total, '10.00');
+});
+
+// ---------- 模型矩阵：三态语义（unknown ≠ no，最容易被写成 !v 而丢掉的地方） ----------
+
+test('matrixCellState：true/false/null 三态各自归位', () => {
+  assert.equal(matrixCellState(true), 'yes');
+  assert.equal(matrixCellState(false), 'no');
+  assert.equal(matrixCellState(null), 'unknown');
+  // 兜底：缺字段 / 非布尔一律按「未知」，绝不猜成「没有」
+  assert.equal(matrixCellState(undefined), 'unknown');
+  assert.equal(matrixCellState('yes'), 'unknown');
+  assert.equal(matrixCellState(0), 'unknown');
+  assert.equal(matrixCellState(1), 'unknown');
+});
+
+test('matrixCellState：null 与 false 必须被区分（专项断言，不许揉成一个）', () => {
+  // 这条是整个矩阵的语义地基：写成 !available 就会把「没抓过」渲染成「没有」
+  assert.notEqual(matrixCellState(null), matrixCellState(false));
+  assert.equal(matrixCellState(null), 'unknown');
+  assert.equal(matrixCellState(false), 'no');
+  // 反证：若有人把实现改成 `available ? yes : no`，null 会掉进 no —— 这里必须红
+  assert.notEqual(matrixCellState(null), 'no');
+});
+
+/** 造一个 host 形状的 /relays/models 响应 */
+function matrixPayload(rows: unknown[], unknownSiteCount: number): unknown {
+  return { ok: true, rows, unknownSiteCount };
+}
+
+test('readModelMatrix：三态从 host 形状正确落到客户端视图', () => {
+  const view = readModelMatrix(
+    matrixPayload(
+      [
+        {
+          id: 'gpt-4o',
+          sites: [
+            { siteId: 'a', name: '甲站', available: true },
+            { siteId: 'b', name: '乙站', available: false },
+            { siteId: 'c', name: '丙站', available: null },
+          ],
+        },
+      ],
+      1,
+    ),
+  );
+  assert.ok(view);
+  assert.equal(view.rows.length, 1);
+  assert.equal(view.unknownSiteCount, 1);
+  assert.deepEqual(
+    view.rows[0].cells.map((c) => [c.name, c.state]),
+    [
+      ['甲站', 'yes'],
+      ['乙站', 'no'],
+      ['丙站', 'unknown'],
+    ],
+  );
+});
+
+test('readModelMatrix：ok 不为 true / rows 不是数组 → null（轮询安全，不抛）', () => {
+  assert.equal(readModelMatrix({ ok: false, reason: 'fetch-error' }), null);
+  assert.equal(readModelMatrix({ ok: true }), null);
+  assert.equal(readModelMatrix({ ok: true, rows: 'nope' }), null);
+  assert.equal(readModelMatrix(null), null);
+  assert.equal(readModelMatrix('x'), null);
+});
+
+test('readModelMatrix：坏行/坏格子被跳过，不拖垮整张矩阵', () => {
+  const view = readModelMatrix(
+    matrixPayload(
+      [
+        { id: 'ok-model', sites: [{ siteId: 'a', name: '甲站', available: true }] },
+        { sites: [] }, // 缺 id
+        { id: 'no-sites' }, // 缺 sites 数组 → 该行仍保留，只是没有格子
+        { id: 'bad-cell', sites: [{ name: '无 siteId' }, 'x'] },
+      ],
+      0,
+    ),
+  );
+  assert.ok(view);
+  assert.deepEqual(view.rows.map((r) => r.id), ['ok-model', 'no-sites', 'bad-cell']);
+  assert.equal(view.rows[0].cells.length, 1);
+  assert.equal(view.rows[1].cells.length, 0);
+  assert.equal(view.rows[2].cells.length, 0, '坏格子应被跳过');
+  assert.equal(view.unknownSiteCount, 0);
+});
+
+test('readModelMatrix：保留 host 的排序（行按模型名、格子按站点名），不自行重排', () => {
+  const view = readModelMatrix(
+    matrixPayload(
+      [
+        { id: 'b-model', sites: [{ siteId: 's2', name: '乙站', available: true }] },
+        { id: 'a-model', sites: [{ siteId: 's1', name: '甲站', available: true }] },
+      ],
+      0,
+    ),
+  );
+  assert.ok(view);
+  // 客户端只渲染：顺序由 host 定，客户端原样透传（改了就会出现两份真相）
+  assert.deepEqual(view.rows.map((r) => r.id), ['b-model', 'a-model']);
+});
+
+test('readModelMatrix：unknownSiteCount 缺省按 0（不猜）', () => {
+  const view = readModelMatrix({ ok: true, rows: [] });
+  assert.ok(view);
+  assert.equal(view.unknownSiteCount, 0);
+  assert.deepEqual(view.rows, []);
 });

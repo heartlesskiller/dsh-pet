@@ -142,7 +142,7 @@ dsh plugin --profile web add file:D:/path/to/dsh-pet/dsh-pet
 
 ```sh
 npm install -g dsh-pet        # 必须 npm 装；dsh plugin add 装进 profile，bin 不在 PATH 上
-dsh-pet-standalone            # http://127.0.0.1:3080/dsh-pet-7340/（占用则顺延）
+dsh-pet-standalone            # http://127.0.0.1:3080/dsh-pet-7340/（端口被占 → 明确失败，不顺延）
 dsh-pet-standalone --check    # 只体检
 dsh-pet-standalone --port 3100
 
@@ -154,6 +154,18 @@ npm run build && npm run standalone   # 仓库里（先构建）
 - **配置**：与 DSH 同一份（`$DSH_HOME/dsh-pet/main-config.jsonc` → 包内默认）。
 - **只显示 `display` 含 `desktop`/`both` 的实例**；端口默认 3080；`Ctrl+C` 或 `POST /shutdown` 退出。
 - **与 DSH 内运行可同时开**，但共用 `%APPDATA%\dsh-pet-electron-helper`，可能互相踩缓存（仅告警）。
+- **中转站管理**：浏览器打开 `http://127.0.0.1:<端口>/admin`（HTML 单页，**零数据嵌入**，凭证只以掩码出现）；桌面快捷方式「中转站管理」指向 `scripts/open-admin.mjs`。
+
+### 🛠 独立模式运维：三个必知坑（现象 → 真实原因 → 正确做法）
+
+| # | 现象 | 真实原因 | 正确做法 |
+|---|---|---|---|
+| 1 | 设了 `DSH_PET_ELECTRON_PATH` 指向 `node.exe`（或别的非 Electron 可执行文件），**服务仍去下载 Electron**，桌面上多出第二只桌宠 | 该变量只在「文件已存在」时被当作现成运行时；`resolveElectronPath` 仍会校验它是不是 Electron，不是就走「没找到 → 下载」分支 | **不要拿它当「禁用 Electron」的开关**。要不出桌面窗口就改配置：`display` 设成 `web` 或 `none`（`main-config.jsonc` 的宠物条目）；要换运行时才用它 |
+| 2 | `curl http://127.0.0.1:3080/health` 返回 **502 Bad Gateway**，以为服务挂了 | 环境里设了 `HTTP_PROXY`/`HTTPS_PROXY`，而 `no_proxy` 没覆盖 `127.0.0.1`，curl 把本机请求交给了代理 | 本机验收 curl **一律带 `--noproxy '*'`**：`curl -s --noproxy '*' http://127.0.0.1:3080/health` |
+| 3 | 为了「干净验收」关停 3080 上已在跑的服务，结果**用户眼前的桌宠没了** | 该服务正拉着桌面 Helper（1 个 node 服务 + 1 个 Electron 主进程 + 若干 GPU/network/renderer 子进程，共约 4 个 electron.exe） | **验收不要关停已在跑的服务**。冒烟用隔离环境：另设 `DSH_HOME=<临时目录>` + 换一个端口 + `display:none`，跑完 `/shutdown` 并删掉临时目录 |
+
+> 单实例：独立模式在绑定端口前先取实例锁（`$DSH_HOME/dsh-pet/standalone.lock`）。锁被占用 → stderr 打印「已有实例在运行（PID=…，端口=…）」并**非零退出**，**绝不顺延到别的端口**（顺延正是「误双击起出第二只桌宠」的成因）。进程被 `SIGKILL` 时锁文件会留下，下次启动按 PID 存活判定自动回收；若 PID 被复用导致误判，删掉该锁文件即可。
+
 
 ## ⚙️ 余额展示（Balance）
 

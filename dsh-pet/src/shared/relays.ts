@@ -310,3 +310,75 @@ export function relaysAlertKey(view: RelaysView): string {
     .sort()
     .join(',');
 }
+
+// ---------- 模型矩阵（GET /relays/models → 客户端视图） ----------
+
+/**
+ * 矩阵格子三态。**`unknown` 与 `no` 是两件事，绝不许揉成一个**：
+ *   - `yes`     该站有這個模型
+ *   - `no`      抓过，确认没有
+ *   - `unknown` **没抓过 = 不知道**，不是「没有」
+ *
+ * 为什么单独一个类型：前端最容易写成 `!cell.available` 判「没有」——那样 `null`
+ * （没抓过）会被渲染成「无」，用户据此判断「这站没我要的模型」而实际是从未抓过。
+ * 矩阵本身（并集、三态、排序）由 host 的 `aggregateModelMatrix` 一次算清，
+ * 两端 UI **只渲染、不重算**（重算就会出现两份真相漂移）。
+ */
+export type MatrixCellState = 'yes' | 'no' | 'unknown';
+
+/**
+ * 三态分类 —— **唯一**允许把 `boolean | null` 折成状态的地方，两端 UI 共用。
+ * 纯函数、无依赖，`shared/relays.test.ts` 有 `null !== false` 的专项断言。
+ */
+export function matrixCellState(available: unknown): MatrixCellState {
+  if (available === true) return 'yes';
+  if (available === false) return 'no';
+  return 'unknown';
+}
+
+/** 矩阵一个格子（站点列） */
+export interface MatrixCell {
+  siteId: string;
+  name: string;
+  state: MatrixCellState;
+}
+
+/** 矩阵一行（一个模型） */
+export interface MatrixRow {
+  id: string;
+  cells: MatrixCell[];
+}
+
+export interface RelaysModelMatrix {
+  rows: MatrixRow[];
+  /** 从未抓过模型的站点数（UI 提示「N 个站未抓取」，不把未知演成没有） */
+  unknownSiteCount: number;
+}
+
+/** 解析 `GET /relays/models` 的响应体；形状非法 → null（与 readRelays 同口径：不抛） */
+export function readModelMatrix(payload: unknown): RelaysModelMatrix | null {
+  const obj = asObj(payload);
+  if (!obj || obj.ok !== true) return null;
+  const rawRows = Array.isArray(obj.rows) ? obj.rows : null;
+  if (rawRows === null) return null;
+  const rows: MatrixRow[] = [];
+  for (const raw of rawRows) {
+    const row = asObj(raw);
+    const id = asStr(row?.id);
+    if (row === undefined || id === undefined) continue;
+    const cells: MatrixCell[] = [];
+    const rawCells = Array.isArray(row.sites) ? row.sites : [];
+    for (const rawCell of rawCells) {
+      const cell = asObj(rawCell);
+      const siteId = asStr(cell?.siteId);
+      if (cell === undefined || siteId === undefined) continue;
+      cells.push({
+        siteId,
+        name: asStr(cell.name) ?? siteId,
+        state: matrixCellState(cell.available),
+      });
+    }
+    rows.push({ id, cells });
+  }
+  return { rows, unknownSiteCount: asNum(obj.unknownSiteCount) ?? 0 };
+}

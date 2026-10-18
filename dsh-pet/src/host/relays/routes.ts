@@ -225,49 +225,64 @@ export interface ModelMatrixRow {
  * 口径：行 = 全部已抓模型的并集（按 id 排序）；每行的格子覆盖**全部站点**——
  * 有=true、抓过没有=false、没抓过=null。`unknownSiteCount` = 从未抓过的站点数
  * （UI 提示「N 个站未抓取」，不把未知演成没有）。
+ *
+ * 实现要点（踩过的坑）：**必须最后统一补全格子，不能在遍历中增量补**。
+ * 增量补只回看「当时已存在的行」，于是后出现的模型行拿不到先处理的站点的格子 ——
+ * 那个格子会**缺失**，而客户端对缺失格子的兜底是「未知」，语义正好反了
+ * （真实答案是「抓过、没有」却显示成「没抓过」）。所以这里先算并集，再逐格判定。
  */
 export function aggregateModelMatrix(
   sites: RelaySite[],
   cache: RelayModelCache,
 ): { rows: ModelMatrixRow[]; unknownSiteCount: number } {
   const byName = sites.slice().sort((a, b) => a.name.localeCompare(b.name));
-  const rows = new Map<string, ModelMatrixRow>();
+  // 每站「抓过哪些模型」的集合；没抓过的站不进这个表（格子最终是 null）
+  const presentBySite = new Map<string, Set<string>>();
+  // 倍率/价格是**按站**的（同一个模型在不同站可以有不同 ratio），必须按 (siteId, modelId) 存
+  const metaBySite = new Map<string, Map<string, { ratio?: number; price?: number }>>();
+  const modelIds = new Set<string>();
   for (const site of byName) {
     const entry = cache[site.id];
     if (!entry) continue; // 未抓过的站：最后统一补「未知」格子
-    const present = new Set(entry.models.map((m) => m.id));
+    const present = new Set<string>();
+    presentBySite.set(site.id, present);
     for (const model of entry.models) {
-      let row = rows.get(model.id);
-      if (!row) {
-        row = { id: model.id, sites: [] };
-        rows.set(model.id, row);
+      present.add(model.id);
+      modelIds.add(model.id);
+      if (model.ratio !== undefined || model.price !== undefined) {
+        let meta = metaBySite.get(site.id);
+        if (!meta) {
+          meta = new Map<string, { ratio?: number; price?: number }>();
+          metaBySite.set(site.id, meta);
+        }
+        meta.set(model.id, {
+          ...(model.ratio !== undefined ? { ratio: model.ratio } : {}),
+          ...(model.price !== undefined ? { price: model.price } : {}),
+        });
       }
-      row.sites.push({
-        siteId: site.id,
-        name: site.name,
+    }
+  }
+  // 行 = 并集；每行**覆盖全部站点**，逐格判定，不存在"缺格子"
+  const rows: ModelMatrixRow[] = [...modelIds].sort((a, b) => a.localeCompare(b)).map((id) => ({
+    id,
+    sites: byName.map((site) => {
+      const present = presentBySite.get(site.id);
+      const base = { siteId: site.id, name: site.name };
+      // 没抓过 → null（未知）；抓过且不在列表里 → false（确认没有）；在列表里 → true
+      if (present === undefined) return { ...base, available: null };
+      if (!present.has(id)) return { ...base, available: false };
+      const m = metaBySite.get(site.id)?.get(id);
+      return {
+        ...base,
         available: true,
-        ...(model.ratio !== undefined ? { ratio: model.ratio } : {}),
-        ...(model.price !== undefined ? { price: model.price } : {}),
-      });
-    }
-    // 别的站有、这一站抓过但没有 → false（「不可用」而不是不列出）
-    for (const row of rows.values()) {
-      if (present.has(row.id)) continue;
-      if (row.sites.some((c) => c.siteId === site.id)) continue;
-      row.sites.push({ siteId: site.id, name: site.name, available: false });
-    }
-  }
-  // 从未抓过的站 → 每行补 null 格子（未知 ≠ 没有）
+        ...(m?.ratio !== undefined ? { ratio: m.ratio } : {}),
+        ...(m?.price !== undefined ? { price: m.price } : {}),
+      };
+    }),
+  }));
   const unknownSites = byName.filter((s) => !cache[s.id]);
-  for (const row of rows.values()) {
-    for (const site of unknownSites) {
-      if (row.sites.some((c) => c.siteId === site.id)) continue;
-      row.sites.push({ siteId: site.id, name: site.name, available: null });
-    }
-    row.sites.sort((a, b) => a.name.localeCompare(b.name));
-  }
   return {
-    rows: [...rows.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    rows,
     unknownSiteCount: unknownSites.length,
   };
 }

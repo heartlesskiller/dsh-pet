@@ -54,6 +54,15 @@ const REQUIRED_MARKERS: Array<[string, string]> = [
   ['无限额度渲染', '无限额度'],
   ['全局错误区', 'id="global-error"'],
   ['汇总区', 'id="summary"'],
+  ['模型矩阵区块', 'id="matrix-section"'],
+  ['模型矩阵表格', 'id="matrix-table"'],
+  ['模型矩阵行容器', 'id="matrix-rows"'],
+  ['模型矩阵表头行', 'id="matrix-head-row"'],
+  ['矩阵加载按钮', 'id="matrix-load"'],
+  ['矩阵未知提示', 'id="matrix-hint"'],
+  ['三态文案-有', "'有'"],
+  ['三态文案-无', "'无'"],
+  ['三态文案-未知', "'未知'"],
 ];
 
 /** 页面会调用的真实路由（少一个就说明页面在打 404） */
@@ -117,6 +126,40 @@ test('unlimited 与 rateUnconfirmed 的渲染口径正确（语义不能反）',
   // 失败回执必须带 reason（不许吞）
   assert.ok(html.includes('查不到（'));
   assert.ok(html.includes('failText'));
+});
+
+// ---------- 模型矩阵三态（unknown ≠ no） ----------
+
+test('矩阵三态表达式与 shared/relays.ts 的 matrixCellState 逐字一致（防漂移）', () => {
+  // admin-page.ts 是纯字符串页、无法 import shared；这里把它的分类表达式钉死，
+  // 谁改坏了这条就红（权威实现在 src/shared/relays.ts，有 null !== false 专项单测）。
+  const html = renderAdminPage();
+  assert.ok(
+    html.includes("return v === true ? 'yes' : v === false ? 'no' : 'unknown'"),
+    '矩阵三态分类表达式被改动 —— 请同步 src/shared/relays.ts 的 matrixCellState 并更新本断言',
+  );
+  // 绝不许出现把 null 揉进「无」的写法
+  assert.equal(/cellState\([^)]*\)\s*\?\s*'yes'\s*:\s*'no'/.test(html), false, '三元不能把 null 归到 no');
+  assert.equal(html.includes('!cell.available'), false);
+  assert.equal(html.includes('!v'), false);
+});
+
+test('矩阵三态在页面上视觉可区分（未知必须有独立样式类）', () => {
+  const html = renderAdminPage();
+  assert.ok(html.includes('.cell-yes'));
+  assert.ok(html.includes('.cell-no'));
+  assert.ok(html.includes('.cell-unknown'), '未知态必须有独立样式，不能与「无」共用');
+  // 「无」无底色、「未知」有底色：CSS 层面就可区分
+  assert.ok(/\.cell-no\s*\{[^}]*background:\s*transparent/.test(html), '「无」应无底色');
+  assert.ok(/\.cell-unknown\s*\{[^}]*background:/.test(html), '「未知」应有底色');
+  // 文案也必须不同
+  assert.ok(html.includes("unknown: '未知'"));
+  assert.ok(html.includes("no: '无'"));
+});
+
+test('矩阵调用真实路由 /relays/models（GET，不写死端口）', () => {
+  const html = renderAdminPage();
+  assert.ok(html.includes("api('/relays/models', 'GET')"));
 });
 
 test('服务端数据一律用 textContent 渲染（不用 innerHTML，堵住注入）', () => {

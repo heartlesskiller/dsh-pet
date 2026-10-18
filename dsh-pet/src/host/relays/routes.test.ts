@@ -233,3 +233,83 @@ test('aggregateModelMatrix：空缓存 → 0 行 + 全部站点未知（不演�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('aggregateModelMatrix：三站各有不同模型 → 行数 = 并集大小', () => {
+  const dir = tmp();
+  try {
+    const a = upsertSite(dir, { name: 'A站', url: 'https://a.example.com', kind: 'new-api' });
+    const b = upsertSite(dir, { name: 'B站', url: 'https://b.example.com', kind: 'new-api' });
+    const c = upsertSite(dir, { name: 'C站', url: 'https://c.example.com', kind: 'new-api' });
+    const at = '2026-10-17T00:00:00.000Z';
+    const cache: RelayModelCache = {
+      [a.id]: { models: [{ id: 'm1' }, { id: 'm2' }], fetchedAt: at },
+      [b.id]: { models: [{ id: 'm2' }, { id: 'm3' }], fetchedAt: at },
+      [c.id]: { models: [{ id: 'm3' }, { id: 'm4' }], fetchedAt: at },
+    };
+    const { rows, unknownSiteCount } = aggregateModelMatrix(loadSites(dir), cache);
+    // 并集 {m1,m2,m3,m4} = 4；重复的 m2/m3 不许多出行
+    assert.deepEqual(rows.map((r) => r.id), ['m1', 'm2', 'm3', 'm4']);
+    assert.equal(unknownSiteCount, 0, '三站都抓过 → 没有未知站');
+    // 每一行都必须覆盖全部站点（不缺列）
+    for (const row of rows) assert.equal(row.sites.length, 3, row.id + ' 应覆盖 3 个站点');
+    // 回归（本次抓到的真 bug）：m3/m4 是 B/C 站才引入的行，旧实现**不给 A 站补格子**，
+    // 那个格子会缺失，而客户端对缺失格子的兜底是「未知」——真实答案是「抓过、没有」。
+    // 语义正好反，所以这里逐格钉死。
+    const m3 = rows.find((r) => r.id === 'm3');
+    assert.ok(m3);
+    assert.deepEqual(m3.sites.map((c) => [c.name, c.available]), [
+      ['A站', false],
+      ['B站', true],
+      ['C站', true],
+    ]);
+    const m4 = rows.find((r) => r.id === 'm4');
+    assert.ok(m4);
+    assert.deepEqual(m4.sites.map((c) => [c.name, c.available]), [
+      ['A站', false],
+      ['B站', false],
+      ['C站', true],
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('aggregateModelMatrix：顺序稳定 —— 同一输入两次结果逐字节一致', () => {
+  const dir = tmp();
+  try {
+    const a = upsertSite(dir, { name: '乙站', url: 'https://b.example.com', kind: 'new-api' });
+    const b = upsertSite(dir, { name: '甲站', url: 'https://a.example.com', kind: 'new-api' });
+    const at = '2026-10-17T00:00:00.000Z';
+    const cache: RelayModelCache = {
+      [a.id]: { models: [{ id: 'z-model' }, { id: 'a-model' }], fetchedAt: at },
+      [b.id]: { models: [{ id: 'm-model' }], fetchedAt: at },
+    };
+    const first = aggregateModelMatrix(loadSites(dir), cache);
+    const second = aggregateModelMatrix(loadSites(dir), cache);
+    assert.equal(JSON.stringify(first), JSON.stringify(second), '两次聚合必须完全一致');
+    // 行按模型 id、格子按站点名：都升序且稳定
+    assert.deepEqual(first.rows.map((r) => r.id), ['a-model', 'm-model', 'z-model']);
+    assert.deepEqual(first.rows[0].sites.map((c) => c.name), ['甲站', '乙站']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('aggregateModelMatrix：unknownSiteCount 只数「从未抓过」的站，混合场景正确', () => {
+  const dir = tmp();
+  try {
+    const a = upsertSite(dir, { name: 'A站', url: 'https://a.example.com', kind: 'new-api' });
+    upsertSite(dir, { name: 'B站', url: 'https://b.example.com', kind: 'new-api' });
+    upsertSite(dir, { name: 'C站', url: 'https://c.example.com', kind: 'new-api' });
+    upsertSite(dir, { name: 'D站', url: 'https://d.example.com', kind: 'new-api', enabled: false });
+    const at = '2026-10-17T00:00:00.000Z';
+    const cache: RelayModelCache = {
+      [a.id]: { models: [{ id: 'm1' }], fetchedAt: at },
+      // B/C 未抓过；D 停用但同样未抓过 —— 计数口径是「没抓过」，与启用无关
+    };
+    const { unknownSiteCount } = aggregateModelMatrix(loadSites(dir), cache);
+    assert.equal(unknownSiteCount, 3, 'B/C/D 三站未抓过');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
