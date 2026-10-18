@@ -4,6 +4,10 @@
 > 上游输入：`06-research-optimization.md` **附录 B（B-1…B-7 坑 + B-修1…B-修7）** 与 **附录 C（C-1…C-8 陷阱）**；路由契约取自 `dsh-pet/src/host/index.ts:945-954` 与 `relays/routes.ts`
 > 纪律：**只写文档，未改任何代码**。每条结论可追溯到附录 B/C 编号；**未验证的一律标 [未验证]**，不新增说法。
 
+> **⚠️ 这篇是「站点类型 × 坑位」参考手册，不是入门教程。**
+> - 第一次用、想直接上手 → 看 `17-user-guide.md`（独立模式）或 `09-onboarding.md`（DSH 插件）
+> - 本文的 curl 示例是给工程师自测与排错用的；普通用户请在 `/admin` 页面或 DSH 设置页里点
+
 ---
 
 ## 0. 怎么用这份文档
@@ -13,7 +17,7 @@
 | 我要加一个中转站，不知道填什么 | **§1** 找到你的站点类型 → 照表填 |
 | 我担心填错 | **§1** 每张表的「填错了会发生什么」列 |
 | 加之前想先确认这个站能不能查 | **§2** 添加前先自查（5 个问题） |
-| 加完了，显示不对 / 报错 | **§3** 添加后先验证（4 步 + 失败对照） |
+| 加完了，显示不对 / 报错 | **§3** 添加后先验证（分步 + 失败对照） |
 | 显示的数字和站点后台对不上 | **§4** 坑 → 用户可执行检查项映射表 |
 | 不知道该给哪个凭证 | **§5** 凭证选择决策树 |
 
@@ -101,7 +105,7 @@
 |---|---|---|---|
 | URL | ✅ | 同 1.1 | 站点根地址 |
 | 凭证 | ✅ | 同 1.1（done-hub 同样基于 new-api，`/api/user/self` 兼容） | 同 1.1 |
-| 🔴 **换算率** | ✅ **必须人工核对** | 🔴🔴 **done-hub 的 `QuotaPerUnit` 默认值官方文档一处写 `500`、一处写 `500000`，相差 1000 倍**（附录 C-1）。若探测不到而静默用了 500000，而站点实际是 500 → **余额显示为实际值的 1000 倍** → 要么永远不告警（阈值显得永远够），要么一上线就误报 | **添加后必须做这个核对**：<br>1. 登录站点后台，记下它显示的余额数字（如 `$10.00`）<br>2. 看我们显示的金额<br>3. **不一致 → 手动改换算率**，直到一致<br>4. 若我们的界面显示「换算率未确认」，说明探测失败，**必须手工填**（PLAN 修订 #11：`rateUnconfirmed`，绝不静默用默认值） |
+| 🔴 **换算率** | ✅ **必须确认** | 🔴🔴 **done-hub 的 `QuotaPerUnit` 默认值官方文档一处写 `500`、一处写 `500000`，相差 1000 倍**（附录 C-1）。若探测不到而静默用了 500000，而站点实际是 500 → **余额显示为实际值的 1000 倍** → 要么永远不告警（阈值显得永远够），要么一上线就误报 | **先看 detect 给没给建议值**（别手工算）：<br>1. `POST /relays/detect` 的返回里若带 **`suggestedQuotaPerUnit`**，说明已从该站 `/api/status` 读到真实值 → **直接采用**<br>2. 没有该字段（探测不到）→ **才需要人工核对**：<br>　 a. 登录站点后台，记下它显示的余额（如 `$10.00`）<br>　 b. 看我们显示的金额<br>　 c. 不一致 → 手动改换算率直到一致<br>3. 界面显示「⚠ 换算率未确认」＝探测没成功、且你还没确认过（建站默认 `rateConfirmed: false`），**必须手工填**（PLAN 修订 #11：绝不静默用默认值） |
 | 🟠 **单位** | — | 🟠 done-hub 的 `DisplayInCurrencyEnabled` 默认值文档同样冲突（附录 C-2）：一处 `false`、一处「Currency Mode (Default)」。若站点关了这个开关，**返回的是 quota 原值而非美元** → 显示 `5000000` 而不是 `$10.00` | 看到**量级荒谬的大数字**（如 `5000000`）就是这种情况 → 检查换算率是否填对 |
 | 阈值 | ⚠️ 建议 | 同 1.1 | 同 1.1 |
 | 精度预期 | — | 🟠 done-hub 有**预消费机制**（附录 C-5）：请求前按 `PreConsumedQuota`（默认 500 点）预留，响应后结算差额 → **抓取到的余额与真实可用额有微小时间差**，不要当精确值 | 无需动作，知道即可 |
@@ -185,7 +189,7 @@
 
 ---
 
-## 3. 添加后先验证（4 步，用我们自己的端点）
+## 3. 添加后先验证（按顺序做，用我们自己的端点）
 
 > 前缀：**`http://127.0.0.1:3080/dsh-pet-7340`**（端口以实际为准；PLAN R0 会加单实例锁与发现机制）。
 > 错误口径（`relays/routes.ts:9-14`）：**结构性参数错误 → HTTP 4xx + `{error}`**；**动作类失败 → HTTP 200 + `{ok:false, reason, message}`**。
@@ -210,13 +214,32 @@ curl -s -X POST http://127.0.0.1:3080/dsh-pet-7340/relays \
     "name": "我的A鱼站",
     "url": "https://api.example.com",
     "kind": "new-api",
-    "credential": { "kind": "api-key", "secret": "sk-xxxx" }
+    "credential": { "kind": "api-key", "secret": "sk-xxxx" },
+    "lowThreshold": "5.00"
   }'
 ```
+
+**入参字段**（`store.ts:73-87` 的 `SiteInput`）：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `name` / `url` / `kind` | ✅ | 名称、根地址、站点类型 |
+| `credential` | ✅（除 `manual`）| `{ kind, secret, extraHeaders? }` |
+| `quotaPerUnit?` | — | 换算率。**不传见下方说明** |
+| `rateConfirmed?` | — | 换算率是否已确认。**不传 = `false`** |
+| `lowThreshold?` | — | 低余额阈值；不传则该站不告警 |
+| `enabled?` | — | 是否参与刷新与告警 |
+| `manualBalance?` | — | `{ amount, currency }`，手工余额 |
+| `note?` | — | 备注 |
+
+> 🔴 **建站时不传 `rateConfirmed` 就是 `false`**——所以你新增站点后看到「**⚠ 换算率未确认**」是**正常的、不是填错了**。
+> 它表示：这个站的换算率**还没从 `/api/status` 探测过**（或探测失败）。先跑一次 `POST /relays/detect`，它若返回 `suggestedQuotaPerUnit` 就采用；确认无误后再把 `rateConfirmed` 置 `true`。
+> 未确认的站点**余额带 `rateUnconfirmed` 标记、不参与低余额告警**——这是故意的，避免用一个可能差 1000 倍的汇率去告警。
+
 | 结果 | 含义 | 怎么办 |
 |---|---|---|
 | 返回站点视图（`credential.masked` 形如 `sk-ab****wxyz`）| ✅ 添加成功 | 进入第 2 步 |
-| `{"error":"..."}` (4xx) | 结构性错误：URL 不合法 / kind 未知 / 凭证类型不在白名单 | 看 message。可用 kind：`new-api` / `sub2api` / `openai-compat`；可用凭证：`access-token` / `api-key` / `session-cookie` / `manual` |
+| `{"error":"..."}` (4xx) | 结构性错误：URL 不合法 / kind 未知 / 凭证类型不在白名单 / `rateConfirmed` 不是布尔 | 看 message。可用 kind：`new-api` / `sub2api` / `openai-compat`；可用凭证：`access-token` / `api-key` / `session-cookie` / `manual` |
 | `{"error":"未知凭证类型：jwt"}` | 🔴 **VoAPI 的 JWT 尚未支持**（附录 C-3 / PLAN 修订 #12 只预留未实现）| 该站先选手工填余额 |
 
 > **🔴 安全设计**：响应体**绝不出现明文凭证**——`assertNoSecret` 会在返回前扫描，一旦发现明文就**让该请求失败**（`relays/routes.ts:93-99`）。看到掩码是正常的。
@@ -224,7 +247,33 @@ curl -s -X POST http://127.0.0.1:3080/dsh-pet-7340/relays \
 ### 第 2 步 · 识别 + 连通（**同一个 `/api/status` 请求，不拆两次**）
 
 > PLAN 修订 #15：`detect` 与 `health` **合并为一次 `/api/status` 请求**。
-> ⚠️ **`POST /relays/detect` 是计划中的端点（PLAN 修订 #9），尚未实现**——现在只能先靠 `health`。
+> ✅ **`POST /relays/detect` 已实现**（`relays/routes.ts:63` + `relays/handlers.ts:41`）。
+
+**① 先识别类型**（不落库，凭证只用于探测）：
+
+```bash
+curl -s -X POST http://127.0.0.1:3080/dsh-pet-7340/relays/detect \
+  -H 'Content-Type: application/json' \
+  -d '{ "url": "https://api.example.com", "credential": { "kind": "api-key", "secret": "sk-xxxx" } }'
+```
+
+**预期返回（`RelayDetectResult`，`detect.ts:21-30`）**：
+```json
+{ "kind": "new-api", "confidence": "likely",
+  "evidence": ["status:...", "..."],
+  "suggestedQuotaPerUnit": 500000,
+  "displayInCurrency": true }
+```
+
+| 字段 | 含义 | 用户该做什么 |
+|---|---|---|
+| `kind` | 判定的站点类型，可能是 `unknown` | `unknown` 不阻塞——仍可按通用链路试 |
+| `confidence` | 把握程度 | 弱置信度时建议手动确认类型 |
+| `evidence` | 判定依据（人话） | 看它「为什么这么判」，不信就手选 |
+| **`suggestedQuotaPerUnit`** | ⭐ **从 `/api/status` 探测到的真实换算率** | **有值就直接采用**（§1.5 的换算率核对可以先跳过）；没有该字段才人工核对 |
+| `displayInCurrency` | 站点是否以货币计价 | `false` → 返回的是 quota 原值，见附录 B 坑 5 |
+
+**② 再探连通**（同一个 `/api/status`，`detect` 已经打过一次，这里只是取健康态）：
 
 ```bash
 curl -s -X POST http://127.0.0.1:3080/dsh-pet-7340/relays/<id>/health
@@ -269,8 +318,13 @@ curl -s -X POST http://127.0.0.1:3080/dsh-pet-7340/relays/<id>/refresh
 | （成功） | ✅ | **立刻做金额核对**：拿站点后台的余额数字，与 `data.total` 对比 |
 | `unsupported` | 该站点类型的 provider 还没写（如 `sub2api`）| 先手工填余额，等 provider 上线 |
 | `credential-missing` | 凭证为空或 `kind: manual` | 配凭证，或改用手工余额 |
-| `fetch-error` | 网络/解析失败（含被 CF 拦、200-with-error）| 看 message；按 §2 排查 |
+| `fetch-error` | 其他网络/解析失败（含 200-with-error、字段缺失）| 看 message；按 §2 排查 |
+| **`blocked`** | 🔴 **被 Cloudflare / 反代 / Bot Detection 挡住**（`newapi.ts` 的 `isBlockedOrLimited()` 判定；注意**挑战页可能仍是 HTTP 200**）| **先手工填余额**。这不是你的凭证错，重试无用 |
+| **`rate-limited`** | 🟠 **被站点限流**（429）| 别反复刷。等几分钟，或调大该站的刷新间隔 |
 | `manual` | 降级路径，不是失败 | 用手工余额（§1.7）|
+
+> `blocked` 与 `rate-limited` 是**新拆出来的两个独立原因**（`types.ts:155`）——以前它们都被笼统归到 `fetch-error`，用户分不清「被墙了」「被限流了」「真挂了」。现在分开，**处理动作也不同**：`blocked` → 手工填；`rate-limited` → 等一等。
+> 判定细节见 `providers/newapi.test.ts:478/494/501`：403 + `server: cloudflare` → `blocked`；但**200 + `server: cloudflare` 且无 `cf-mitigated` 时不判拦截**（防神经过敏误报）。
 
 **🔴 刷完必须做的核对（最重要的一步）**：
 1. 登录站点后台，记下它显示的**剩余额度**
@@ -452,12 +506,12 @@ curl -s -X POST http://127.0.0.1:3080/dsh-pet-7340/relays/<id>/manual-balance \
 
 | # | 问题 | 位置 | 建议 |
 |---|---|---|---|
-| 1 | 🔴 `relays/types.ts:36` 注释仍写 `access-token` 是「**推荐**」，与 PLAN 修订 #5「API Key 优先」矛盾 | `dsh-pet/src/host/relays/types.ts:36` | 改注释为「默认先用 `api-key`；要账户级总额才用 `access-token`」 |
-| 2 | 🔴 `RelayCredentialKind` 无 `jwt`，VoAPI 无法配置 | `relays/types.ts:40` | PLAN 修订 #12 只「预留」未实现；VoAPI 站目前只能手工填余额 |
+| 1 | ✅ **已闭环**：`types.ts` 凭证注释**已改为「API Key 优先」**，与 PLAN 修订 #5/#22 一致 | `dsh-pet/src/host/relays/types.ts:33-40` | 现文为「`api-key`：模型 API Key。**推荐优先引导**」「`access-token`：……可查账户级余额」——本文档 §5 决策树与之一致 |
+| 2 | 🔴 `RelayCredentialKind` 无 `jwt`，VoAPI 无法配置 | `relays/types.ts:44` | PLAN 修订 #12 只「预留」未实现；VoAPI 站目前只能手工填余额 |
 | 3 | 🟠 `RelayKind` 只有 `new-api / sub2api / openai-compat`，**没有 `voapi` / `done-hub` / `veloera` / `one-hub`** | `relays/types.ts:26` | done-hub / veloera 等接口与 new-api 兼容，可先归入 `new-api`；但 **VoAPI 因 JWT 差异必须独立 kind**（附录 C-3）|
-| 4 | 🟠 `POST /relays/detect` **尚未实现**（PLAN 修订 #9 已列）| `relays/routes.ts:36-43` | 本文档 §3 第 2 步只能用 `health` 代替；detect 上线后应补「识别结果 + 置信度 + evidence」的返回说明 |
-| 5 | 🟢 `RelayHealth` **已有 `blocked`**（附录 B 坑 6 的 CF 归类有归宿）| `relays/types.ts:133` | 但附录 D Q6 的判定表（非JSON+200→blocked 等）**尚未在 `newapi.ts` 实现**——目前落「响应不是 JSON」|
-| 6 | 🟡 `API.md` 无 `/relays` 记载（R5 待补）| `dsh-pet/API.md` | 补 `/relays` 子域契约时，请把 §3 的「预期返回 + 失败对照」一并纳入 |
+| 4 | ✅ **已闭环**：`POST /relays/detect` **已实现** | `relays/routes.ts:63`、`relays/handlers.ts:41`；返回形状 `detect.ts:21-30` | 本文档 §3 第 2 步已改为「先 detect、再 health」，并补了 `kind/confidence/evidence/suggestedQuotaPerUnit/displayInCurrency` 的说明 |
+| 5 | ✅ **已闭环**：CF 判定表**已实现**（附录 B 坑 6 的 `blocked` 归类已接上）| `providers/newapi.ts` 的 `isBlockedOrLimited()`；专项测试 `providers/newapi.test.ts:478`（403+`server:cloudflare`→`blocked`）、`:494`（200+`server:cloudflare` 但无 `cf-mitigated` → **不判拦截**）、`:501`（断言正常出数 `spent === '34.58'`） | 本文档 §3 第 3 步已补 `blocked` / `rate-limited` 两个独立原因。**注意 `:494` 那条是防误报的关键**：见到 `server: cloudflare` 不能神经过敏 |
+| 6 | ✅ **已闭环**：`API.md` / `openapi.yaml` **已补 `/relays` 契约** | 仓库根目录 `API.md` §五「中转站管理（`/relays`）」（19 处命中，含「数据直返」子域例外说明）；`openapi.yaml` 23 处 | **注意路径是仓库根，不在 `dsh-pet/` 下**。文档里的 curl 示例与之一致 |
 
 ---
 
