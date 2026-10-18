@@ -1,3 +1,7 @@
 # 统一行尾：所有文本文件 LF 入库 + LF 检出，杜绝 CRLF 落盘（prettier 全绿）
 # text=auto：二进制文件（png/webm/gif/ttf 等）自动识别、不做转换
 * text=auto eol=lf
+# Windows 批处理必须是 CRLF：cmd.exe 对 LF-only 的 if(...) 块/标签解析不可靠
+# （launch-pet.cmd 是桌面「桌宠」快捷方式的实际入口，坏在这里用户就双击没反应）
+*.cmd text eol=crlf
+*.bat text eol=crlf
