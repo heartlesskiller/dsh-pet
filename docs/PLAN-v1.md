@@ -142,7 +142,7 @@
 | 19 | 产品经理 | **`/api/status` 一个端点三用**：存活探测 + 类型识别 + **读 `data.quota_per_unit` 自动推断换算率**（官方文档明标「鉴权要求:公开」，默认 `500 * 1000.0`） | 换算率**先自动探测**；探测不到才 `rateUnconfirmed`。我此前「探测不到就绝不静默默认」的指令要加前提：**探测是本该走通的第一路径** |
 | 20 | 产品经理 | **AT 预检成功后的业务错误 / Turnstile / 结果不确定，绝不回退 Cookie**（`leolulu/newapi-daily-checkin` 的决策链原话：避免重复签到或把验证码误判为认证失败） | 必须写进 `querySiteBalance` 降级链：**凭证类型不自动降级**，只做「端点内三级降级」 |
 | 21 | 产品经理 | `New-Api-User` 头**已不参与鉴权**（new-api 官方博客明示），值就是用户数字 ID；`Authorization: Bearer` 与裸值**两者都收** | `authHeaders` 保持 Bearer 默认 + `extraHeaders` 逃生口即可；用户引导里删掉「必须带 New-Api-User」的误导 |
-| 22 | 产品经理 | ThendCN 选 Cookie 是**同源 BFF 架构使然，不是站点限制**；AccessToken 才是我们该推的凭证 | 凭证引导顺序定为 **AccessToken → API Key → Cookie(高级逃生) → 手工填写**；Cookie 只在提示里作为高级可选项出现 |
+| 22 | 产品经理 | ThendCN 选 Cookie 是**同源 BFF 架构使然，不是站点限制**；AccessToken 才是我们该推的凭证 | 凭证引导**分两个维度**（不能只写一条顺序，否则 UI 文案会选错）：<br>**按上手成本（推荐默认）**：API Key → AccessToken → Cookie(高级) → 手工<br>**按信息完整度**：AccessToken（账户总额）→ API Key（该 Key 名下用量）→ Cookie → 手工 |
 | 23 | 产品经理 | Cloudflare 拦截面判定表（`cf-mitigated` 头 / `server: cloudflare`+403 / `challenge-platform` 标记页 / `x-datadome`） | `classifyResponse` 按此表实现；**分类取决于站点 CF 配置，必须留配置项**；仍待真实站点验证 |
 
 ## 8. 工程纪律（踩过的坑，违反即返工）
@@ -153,6 +153,7 @@
 | E2 | **`import … from './relays'`（目录导入）在 Node ESM 下直接 `ERR_UNSUPPORTED_DIR_IMPORT`**，而且**只在跑测试时炸**，`tsc` 和 `vite` 都不报。第一版这么写导致 3 个测试文件连带崩溃、**39 个测试静默没跑** | 目录导入一律写成 `./relays/index`（仓库里 `./balance/index` 正是这个写法）。**测试数突然变少就是红色警报，必须先查为什么** |
 | E3 | 测试文件数/用例数**只增不减**；任何一轮完成后核对 `# tests` 总数，掉了就是有文件没跑起来 | 见 E2 |
 | E4 | 数据目录 `relays` 放在 `userRoot/relays`（与 `pet/`、`main-animation/` 同规矩），**不从 `storage-paths.ts` 拿**——那个模块只做路径推导，`userData` 项本身就是调用方传进去的 `userRoot`，它并不定义 relay 目录 | 已确认的决策，不要反复改 |
+| E5 | 🔴 **凭证文件的完整路径是 `<DSH_HOME>/dsh-pet/relays/relay-credentials.json`，多一层 `relays/`**。主理人（我）口头给产品经理的路径漏了这一层，被 PM 读代码当场纠正（`index.ts:292` `userRoot=join(dshHome,'dsh-pet')`、`:302` `relayDir=join(userRoot,'relays')`、`store.ts:36` 文件名） | **对外文档里写路径必须读代码确认，不许凭印象**。文档已按正确路径写（`17-user-guide.md`） |
 
 ## 9. 进度记录
 
