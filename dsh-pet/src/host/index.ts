@@ -123,44 +123,16 @@ import {
 import { profileNameFrom, storageEntries } from './storage-paths';
 import { PollStateStore } from './state';
 import { timeContextOf } from './time-context';
-import { aggregateBalances, checkSiteHealth, classifyBalanceError, queryAllBalances, querySiteBalance, supportedKinds } from './relays/index';
-import { detectRelayKind } from './relays/detect';
+import { aggregateBalances, checkSiteHealth, queryAllBalances, supportedKinds } from './relays/index';
 import {
-  assertNoSecret,
-  aggregateModelMatrix,
-  collectSecrets,
-  normalizeManualBalance,
-  parseCredential,
-  parseDetectInput,
-  parseFocusInput,
-  parseRelayRoute,
-  relayError,
-  relayFail,
-} from './relays/routes';
-import {
-  clearCredential,
-  clearFocus,
-  getCredential,
-  loadCredentials,
   loadSites,
-  putCredential,
   readFocus,
-  readModelCache,
   recordSnapshots,
-  removeSite,
-  saveSites,
-  setSiteModels,
-  siteViews,
-  toSiteView,
-  upsertSite,
-  writeFocus,
   type DaySnapshots,
-  type SiteInput,
   type SnapshotStore,
 } from './relays/store';
-import { DEFAULT_QUOTA_PER_UNIT } from './relays/money';
-import { fetchSiteModels, probeModels, probeStatus } from './relays/providers/newapi';
-import type { RelayCredential, RelayFetchContext, RelaySite } from './relays/types';
+import { handleRelayRequest } from './relays/handlers';
+import type { RelaySite } from './relays/types';
 import type { RouteResult } from './route-result';
 import { capabilitiesFrom, hostModeOf } from './capabilities';
 import { AgentRegistry } from './gateway/agents';
@@ -1071,255 +1043,17 @@ export function apply(ctx: any): void {
   ): Promise<RouteResult> | RouteResult => gateway.handle(route, method, body);
 
   /**
-   * 中转站管理路由：`/dsh-pet-7340/relays[/{id}[/action]]`
+   * 中转站管理路由（S1 抽离，TD-1）—— **这里只做依赖接线，实现全在 ./relays/handlers**。
    *
-   *   GET    /relays                     全部站点脱敏视图（credential.masked，绝不明文）
-   *   POST   /relays                     新建站点（body = SiteInput + 可选 credential）
-   *   PUT    /relays/{id}                更新站点（可同时更新凭证）
-   *   DELETE /relays/{id}                删站点并删凭证
-   *   POST   /relays/{id}/refresh        刷新该站余额 → RelayBalanceResult
-   *   POST   /relays/refresh-all         并发刷新全部启用站点 → RelayBalanceResult[]
-   *   POST   /relays/{id}/health         连通性探测 → RelayHealthResult
-   *   POST   /relays/{id}/manual-balance 设置/清除手工余额（查不到时的降级路径）
-   *   POST   /relays/detect              站点类型识别（不落库；body = {url, credential?}）
-   *   GET    /relays/models              模型清单矩阵（只读缓存聚合，不外发抓取）
-   *   POST   /relays/{id}/models         实时抓取该站模型清单并写缓存（优先 pricing 回落 v1/models）
-   *   POST   /relays/focus               设置/清除焦点站点（body = {siteId}；只影响展示）
+   * 原来这 224 行长在本函数的闭包里，直接摸宿主能力；已经贴到 PLAN 的 250 行触发线，
+   * 而 relays 还会长（T09 sub2api / T12 VoAPI 都要加分支），所以抽成显式依赖注入。
+   * 只传真正用到的三个（数据目录 / 有没有启用站点 / 立刻重刷状态叶），
+   * 不传整个 ctx —— 那只是把 224 行换个文件名，耦合一点没少。
    *
-   * 两条硬口径（与上游既有分支逐条对齐，不新造）：
-   * 1. **凭证与站点分文件**：`credential` 只进 `relay-credentials.json`，站点文件里
-   *    没有任何密钥字段——导出/备份站点不会顺带泄密；
-   * 2. **每个响应体返回前过一遍脱敏自检**：检出明文凭证就抛错（该请求 500），
-   *    绝不把凭证送出去。宁可端点坏掉，不泄露。
-   *
-   * 错误口径：结构性参数错误（坏 JSON / 缺字段 / 未知路径 / 站点不存在）→ 4xx + `{ error }`；
-   * 与 `/config` `/pet-display` 的 `site not found` 同形。
+   * 端点、错误口径、脱敏自检都在 handlers 里，本文件不再保留第二份实现。
    */
-  const handleRelayRoute = async (rest: string, method: string, body?: string): Promise<RouteResult> => {
-    // 自检基线：数据目录下全部凭证明文（附加头的值同样算）
-    const secrets = collectSecrets(loadCredentials(relayDir));
-    /** 统一出口：自检通过才允许返回 */
-    const reply = (status: number, obj: unknown): RouteResult => {
-      assertNoSecret(obj, secrets);
-      return { kind: 'json', status, obj };
-    };
-    const parseBody = (): unknown => {
-      try {
-        return JSON.parse(body ?? 'null');
-      } catch {
-        return undefined;
-      }
-    };
-    const asObject = (raw: unknown): Record<string, unknown> =>
-      raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-    /** body 的 credential 段：缺省 = 不动；显式 null = 清除；对象 = 校验后写入 */
-    const readCredential = (
-      o: Record<string, unknown>,
-    ): { ok: true; value?: RelayCredential; clear: boolean } | { ok: false; message: string } => {
-      if (!Object.prototype.hasOwnProperty.call(o, 'credential')) return { ok: true, clear: false };
-      const raw = o.credential;
-      if (raw === undefined || raw === null) return { ok: true, clear: true };
-      const parsed = parseCredential(raw);
-      return parsed.ok ? { ok: true, value: parsed.value, clear: false } : parsed;
-    };
-    /** 站点入参 = body 去掉 credential 段（凭证不走站点实体） */
-    const siteInputOf = (o: Record<string, unknown>): SiteInput => {
-      const input: Record<string, unknown> = { ...o };
-      delete input.credential;
-      // 强转是故意的：字段校验在 upsertSite → validateSiteInput 里做（缺 name/url/kind
-      // 会 throw，路由层把它翻成 400）。这里只负责把 credential 段摘掉。
-      return input as unknown as SiteInput;
-    };
-    const applyCredential = (siteId: string, value: RelayCredential | undefined, clear: boolean): void => {
-      if (value) putCredential(relayDir, siteId, value);
-      else if (clear) clearCredential(relayDir, siteId);
-    };
-    const findSite = (id: string): RelaySite | undefined => loadSites(relayDir).find((s) => s.id === id);
-
-    try {
-      const route = parseRelayRoute(rest);
-      if (route.action === 'unknown') return reply(404, relayError('unknown relays route: ' + rest));
-
-      // ---- /relays（GET 列表 / POST 新建）----
-      if (route.action === 'collection') {
-        if (method === 'GET') return reply(200, { ok: true, sites: siteViews(relayDir) });
-        if (method === 'POST') {
-          const raw = parseBody();
-          if (raw === undefined) return reply(400, relayError('invalid JSON body'));
-          const o = asObject(raw);
-          const cred = readCredential(o);
-          if (!cred.ok) return reply(400, relayError(cred.message));
-          const input = siteInputOf(o);
-          delete input.id; // POST 只新建；更新走 PUT（带 id 会被 upsertSite 当成更新）
-          let site: RelaySite;
-          try {
-            site = upsertSite(relayDir, input);
-          } catch (e) {
-            return reply(400, relayError(e instanceof Error ? e.message : String(e)));
-          }
-          applyCredential(site.id, cred.value, cred.clear);
-          return reply(200, { ok: true, site: toSiteView(site, getCredential(relayDir, site.id)) });
-        }
-        return reply(405, relayError('method not allowed'));
-      }
-
-      // ---- /relays/{id}（PUT 更新 / DELETE 删除）----
-      if (route.action === 'item') {
-        if (!findSite(route.id)) return reply(404, relayError('site not found: ' + route.id));
-        if (method === 'PUT') {
-          const raw = parseBody();
-          if (raw === undefined) return reply(400, relayError('invalid JSON body'));
-          const o = asObject(raw);
-          const cred = readCredential(o);
-          if (!cred.ok) return reply(400, relayError(cred.message));
-          let updated: RelaySite;
-          try {
-            updated = upsertSite(relayDir, { ...siteInputOf(o), id: route.id });
-          } catch (e) {
-            return reply(400, relayError(e instanceof Error ? e.message : String(e)));
-          }
-          applyCredential(updated.id, cred.value, cred.clear);
-          return reply(200, { ok: true, site: toSiteView(updated, getCredential(relayDir, updated.id)) });
-        }
-        if (method === 'DELETE') {
-          removeSite(relayDir, route.id); // 站点与凭证一起删（不留孤儿密钥文件）
-          return reply(200, { ok: true, sites: siteViews(relayDir) });
-        }
-        return reply(405, relayError('method not allowed'));
-      }
-
-      // ---- /relays/refresh-all（并发刷新全部启用站点）----
-      if (route.action === 'refresh-all') {
-        if (method !== 'POST') return reply(405, relayError('method not allowed'));
-        const enabled = loadSites(relayDir).filter((s) => s.enabled === true);
-        return reply(200, await queryAllBalances(relayDir, enabled));
-      }
-
-      // ---- /relays/{id}/refresh · /health · /manual-balance ----
-      if (route.action === 'refresh') {
-        if (method !== 'POST') return reply(405, relayError('method not allowed'));
-        const site = findSite(route.id);
-        if (!site) return reply(404, relayError('site not found: ' + route.id));
-        return reply(200, await querySiteBalance(relayDir, site));
-      }
-
-      if (route.action === 'health') {
-        if (method !== 'POST') return reply(405, relayError('method not allowed'));
-        const site = findSite(route.id);
-        if (!site) return reply(404, relayError('site not found: ' + route.id));
-        return reply(200, await checkSiteHealth(relayDir, site));
-      }
-
-      // 手工余额：查不到时的降级路径。空 amount = 清除（撤销降级）。
-      if (route.action === 'manual-balance') {
-        if (method !== 'POST') return reply(405, relayError('method not allowed'));
-        const raw = parseBody();
-        if (raw === undefined) return reply(400, relayError('invalid JSON body'));
-        const mb = normalizeManualBalance(raw);
-        if (!mb.ok) return reply(400, relayError(mb.message));
-        const sites = loadSites(relayDir);
-        const idx = sites.findIndex((s) => s.id === route.id);
-        if (idx < 0) return reply(404, relayError('site not found: ' + route.id));
-        if (mb.clear) {
-          delete sites[idx].manualBalance;
-        } else {
-          sites[idx] = {
-            ...sites[idx],
-            manualBalance: { amount: mb.amount, currency: mb.currency, updatedAt: new Date().toISOString() },
-          };
-        }
-        saveSites(relayDir, sites);
-        return reply(200, { ok: true, site: toSiteView(sites[idx], getCredential(relayDir, route.id)) });
-      }
-
-      // ---- /relays/detect（POST，不落库：识别 + 换算率建议）----
-      // 凭证只用于本次探测（打 /v1/models 拿强信号），**不写盘**——识别是「添加站点」的
-      // 引导步骤，用户还没决定建站。探测失败不是 500：回 unknown + 原因，
-      // UI 引导手动选择类型或先手工填余额（P0-3：不静默失败）。
-      if (route.action === 'detect') {
-        if (method !== 'POST') return reply(405, relayError('method not allowed'));
-        const raw = parseBody();
-        if (raw === undefined) return reply(400, relayError('invalid JSON body'));
-        const input = parseDetectInput(raw);
-        if (!input.ok) return reply(400, relayError(input.message));
-        const cred = input.value.credential;
-        const ctx: RelayFetchContext = {
-          siteId: '',
-          baseUrl: input.value.url,
-          secret: cred?.secret ?? '',
-          kind: cred?.kind ?? 'api-key',
-          extraHeaders: cred?.extraHeaders,
-          quotaPerUnit: DEFAULT_QUOTA_PER_UNIT,
-        };
-        let status: unknown;
-        let models: unknown;
-        try {
-          status = await probeStatus(input.value.url, ctx);
-          if (cred) models = await probeModels(input.value.url, ctx);
-        } catch (e) {
-          return reply(200, {
-            ok: true,
-            detect: { kind: 'unknown', confidence: 'unknown', evidence: [], message: e instanceof Error ? e.message : String(e) },
-          });
-        }
-        return reply(200, { ok: true, detect: detectRelayKind({ status, ...(models !== undefined ? { models } : {}) }) });
-      }
-
-      // ---- /relays/models（GET：只读缓存聚合；**周期刷新不抓模型**，要带凭证外发太重）----
-      if (route.action === 'models') {
-        if (method !== 'GET') return reply(405, relayError('method not allowed'));
-        const { rows, unknownSiteCount } = aggregateModelMatrix(loadSites(relayDir), readModelCache(relayDir));
-        return reply(200, { ok: true, rows, unknownSiteCount });
-      }
-
-      // ---- /relays/{id}/models（POST：实时抓取 + 写缓存；优先 /api/pricing 回落 /v1/models）----
-      if (route.action === 'site-models') {
-        if (method !== 'POST') return reply(405, relayError('method not allowed'));
-        const site = findSite(route.id);
-        if (!site) return reply(404, relayError('site not found: ' + route.id));
-        const cred = getCredential(relayDir, site.id);
-        if (!cred || cred.kind === 'manual') {
-          return reply(200, relayFail('credential-missing', '未配置凭证，无法抓取模型清单'));
-        }
-        try {
-          const out = await fetchSiteModels(site.url, {
-            siteId: site.id,
-            baseUrl: site.url,
-            secret: cred.secret,
-            kind: cred.kind,
-            extraHeaders: cred.extraHeaders,
-            quotaPerUnit: site.quotaPerUnit,
-          });
-          setSiteModels(relayDir, site.id, out.models);
-          return reply(200, { ok: true, siteId: site.id, source: out.source, models: out.models, fetchedAt: new Date().toISOString() });
-        } catch (e) {
-          return reply(200, relayFail(classifyBalanceError(e), e instanceof Error ? e.message : String(e)));
-        }
-      }
-
-      // ---- /relays/focus（POST：焦点站点；只影响展示口径，绝不做请求转发 —— Q4）----
-      if (route.action === 'focus') {
-        if (method !== 'POST') return reply(405, relayError('method not allowed'));
-        const raw = parseBody();
-        if (raw === undefined) return reply(400, relayError('invalid JSON body'));
-        const input = parseFocusInput(raw);
-        if (!input.ok) return reply(400, relayError(input.message));
-        if (input.siteId !== null && !findSite(input.siteId)) {
-          return reply(404, relayError('site not found: ' + input.siteId));
-        }
-        if (input.siteId === null) clearFocus(relayDir);
-        else writeFocus(relayDir, input.siteId);
-        // 立即重刷状态叶，让桌宠第一时间按新焦点展示（用户操作，等不了一个刷新周期）
-        if (hasEnabledRelaySites()) await refreshRelays();
-        return reply(200, { ok: true, focusSiteId: input.siteId });
-      }
-
-      return reply(404, relayError('unknown relays route: ' + rest));
-    } catch (e) {
-      // 脱敏自检失败、store 抛错（文件损坏）等 → 显式 500，不静默
-      return reply(500, relayError(e instanceof Error ? e.message : String(e)));
-    }
-  };
+  const handleRelayRoute = (rest: string, method: string, body?: string): Promise<RouteResult> =>
+    handleRelayRequest({ relayDir, hasEnabledRelaySites, refreshRelays }, rest, method, body);
 
   /** 单次业务路由(WebServer 注册 → HTTP 落盘 / 桌面 Helper 管道 → scheme 应答,共用同一份实现):
    *  输入只需 rawUrl(/dsh-pet-7340/... + 查询) + method + body 文本;返回 RouteResult(JSON/文本/文件),
