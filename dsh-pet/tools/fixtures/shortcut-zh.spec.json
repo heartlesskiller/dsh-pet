@@ -1,0 +1,8 @@
+{
+  "out": "OVERRIDDEN_BY_VERIFIER",
+  "target": "C:/Windows/System32/notepad.exe",
+  "args": "",
+  "cwd": "C:/Windows",
+  "icon": "C:/Windows/System32/notepad.exe",
+  "description": "启动 DSH 桌宠"
+}
