@@ -6,7 +6,8 @@
  *   1. 绑定 127.0.0.1 的**指定**端口（被占用 → 明确失败，**绝不顺延**：顺延会让第二次启动
  *      静默起出第二只桌宠，见 `./instance-lock` 的三重后果）；
  *   2. 把落在插件路由前缀上的请求原样交给那份 handler（它自己写响应头与 body）；
- *   3. 提供 `/` 与 `/health`（运维信息）和 `/shutdown`（脚本化停机）；
+ *   3. 提供 `/` 与 `/health`（运维信息）、`/shutdown`（脚本化停机）与 `/admin`
+ *      （独立模式管理页，见 `./admin-page`）；
  *   4. 兜住 handler 的异常，按插件自身的口径回 500 JSON。
  *
  * 为什么这里不补 `Access-Control-Allow-Origin`：独立模式的桌面渲染端经 bridge 管道
@@ -17,6 +18,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
 
 import type { RegisteredRoute, StandaloneLogger } from './context';
+import { ADMIN_PAGE_PATH, renderAdminPage } from './admin-page';
 
 /** 独立模式默认端口（与插件 helper 的内置默认一致） */
 export const DEFAULT_STANDALONE_PORT = 3080;
@@ -45,6 +47,26 @@ const CORS_HEADERS: Record<string, string> = {
   'access-control-allow-headers': 'content-type',
   'access-control-max-age': '600',
 };
+
+/**
+ * `/admin` 管理页专用的 CSP。
+ *
+ * 仓库此前**没有任何 CSP**（所以这里不是在"放行"谁，而是给这一页补上边界）。
+ * 为什么允许 `script-src 'unsafe-inline'`：管理页是**故意零依赖的单文件**（不引 React、
+ * 不打包，`curl` 下来就能看），内联脚本是它的前提；页面只监听 127.0.0.1。
+ * 换来的是实打实的收紧：`default-src 'self'` + `connect-src 'self'` 让页面**无法加载任何
+ * 远端资源、也无法把数据发去第三方**；`base-uri 'none'` / `form-action 'self'` 堵掉
+ * 基址劫持与表单外投。V2 若要完全去掉 unsafe-inline，把内联脚本改成同源外链即可。
+ */
+const ADMIN_PAGE_CSP = [
+  "default-src 'self'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "connect-src 'self'",
+  "img-src 'self' data:",
+  "base-uri 'none'",
+  "form-action 'self'",
+].join('; ');
 
 /** 只取 pathname（不解码，避免 %2F 一类输入在校验之前被改写）；非法 URL 落回 '/' */
 function pathnameOf(rawUrl: string | undefined): string {
@@ -75,6 +97,18 @@ function sendText(res: ServerResponse, status: number, body: string): void {
   res.writeHead(status, {
     'content-type': 'text/plain; charset=utf-8',
     'content-length': Buffer.byteLength(body),
+    ...CORS_HEADERS,
+  });
+  res.end(body);
+}
+
+/** 发 HTML 页（带 {@link ADMIN_PAGE_CSP}） */
+function sendHtml(res: ServerResponse, status: number, body: string): void {
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'content-security-policy': ADMIN_PAGE_CSP,
+    'cache-control': 'no-store',
     ...CORS_HEADERS,
   });
   res.end(body);
@@ -114,6 +148,17 @@ export function createRequestListener(
       // 先回话再收尾：调用方要能拿到 200，而不是被自己的停机动作打断
       sendJson(res, 200, { ok: true, stopping: true });
       queueMicrotask(() => onShutdown?.());
+      return;
+    }
+    // 独立模式管理页（T06 在 DSH 里是设置页 slot，独立模式没有 slot 生命周期 →
+    // 这里给一张零依赖单页，见 ./admin-page）。放在前缀路由**之前**：
+    // 它不在 /dsh-pet-7340 之下，别被插件 handler 吞掉。
+    if (pathname === ADMIN_PAGE_PATH) {
+      if (method !== 'GET') {
+        sendJson(res, 405, { error: 'method not allowed' });
+        return;
+      }
+      sendHtml(res, 200, renderAdminPage());
       return;
     }
 

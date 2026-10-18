@@ -250,3 +250,44 @@ describe('listenStandaloneServer —— 端口与关闭', () => {
     assert.equal(outside.status, 404);
   });
 });
+
+describe('/admin 管理页 —— 独立模式的唯一站点管理入口（T06 在 DSH 里才是设置页）', () => {
+  const closers: Array<() => Promise<void>> = [];
+
+  after(async () => {
+    for (const close of closers.splice(0)) await close().catch(() => {});
+  });
+
+  test('GET /admin → 200 HTML，含「中转站管理」，且带 CSP', async () => {
+    const server = await listenStandaloneServer({ routes: [pluginLikeRoute()], logger: silent, port: 0 });
+    closers.push(server.close);
+    const res = await fetch(`http://127.0.0.1:${server.port}/admin`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /text\/html/);
+    const csp = res.headers.get('content-security-policy') ?? '';
+    assert.ok(csp.includes("default-src 'self'"), 'CSP 要禁外部资源');
+    assert.ok(csp.includes("connect-src 'self'"), 'CSP 要禁止把数据发去第三方');
+    assert.ok(csp.includes("script-src 'unsafe-inline'"), '单文件零依赖页需要内联脚本（见 ADMIN_PAGE_CSP 注释）');
+    const html = await res.text();
+    assert.ok(html.includes('中转站管理'), '判定标准：curl /admin 要能看到「中转站」');
+    // 页面零数据嵌入：响应体里不得出现任何站点/凭证数据。
+    // 注意别把「access-token」这类**凭证种类枚举值**算进去——它作为表单选项本来就该出现。
+    for (const secret of ['sk-plaintext', 'relay-credentials.json', 'magenta_circle_alpha']) {
+      assert.equal(html.includes(secret), false, `响应体出现了 ${secret}`);
+    }
+  });
+
+  test('非 GET → 405（页是只读的，写操作走 /dsh-pet-7340/relays）', async () => {
+    const server = await listenStandaloneServer({ routes: [pluginLikeRoute()], logger: silent, port: 0 });
+    closers.push(server.close);
+    assert.equal((await fetch(`http://127.0.0.1:${server.port}/admin`, { method: 'POST' })).status, 405);
+  });
+
+  test('/admin 在插件前缀之外：同一服务上两条路由互不遮挡', async () => {
+    const server = await listenStandaloneServer({ routes: [pluginLikeRoute()], logger: silent, port: 0 });
+    closers.push(server.close);
+    assert.equal((await fetch(`http://127.0.0.1:${server.port}/admin`)).status, 200);
+    assert.equal((await fetch(`http://127.0.0.1:${server.port}/dsh-pet-7340/state`)).status, 200);
+    assert.equal((await fetch(`http://127.0.0.1:${server.port}/admin/x`)).status, 404, '没有子路径');
+  });
+});
