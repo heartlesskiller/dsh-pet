@@ -109,7 +109,11 @@ function fakeFetch(handlers: Record<string, { status?: number; body?: unknown }>
     for (const [frag, preset] of Object.entries(handlers)) {
       if (String(url).includes(frag)) {
         const status = preset.status ?? 200;
-        return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(preset.body ?? {}) } as unknown as Response;
+        return {
+          ok: status >= 200 && status < 300,
+          status,
+          text: async () => JSON.stringify(preset.body ?? {}),
+        } as unknown as Response;
       }
     }
     return { ok: false, status: 404, text: async () => '{"error":"not found"}' } as unknown as Response;
@@ -145,10 +149,22 @@ test('main：--status working 全链路（hello + events，各一次 POST，退�
     '/events': { body: { ok: true } },
   });
   const io = captureIo();
-  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--kind', 'workbuddy', '--status', 'working', '--task', 'pnpm test'], {
-    ...io,
-    fetchImpl: impl,
-  });
+  const code = await main(
+    [
+      '--base',
+      'http://127.0.0.1:8231/dsh-pet-7340',
+      '--kind',
+      'workbuddy',
+      '--status',
+      'working',
+      '--task',
+      'pnpm test',
+    ],
+    {
+      ...io,
+      fetchImpl: impl,
+    },
+  );
   assert.equal(code, 0);
   assert.equal(calls.length, 2, 'hello + events 正好两次');
   assert.equal((calls[0].body as { kind: string }).kind, 'workbuddy');
@@ -165,7 +181,10 @@ test('main：--status idle（退出清理）→ events 只带 idle，不带 task
     '/events': { body: { ok: true } },
   });
   const io = captureIo();
-  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--status', 'idle'], { ...io, fetchImpl: impl });
+  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--status', 'idle'], {
+    ...io,
+    fetchImpl: impl,
+  });
   assert.equal(code, 0);
   assert.deepEqual(calls[1].body, { agentId: (calls[0].body as { agentId: string }).agentId, status: 'idle' });
 });
@@ -177,7 +196,18 @@ test('main：notice（severity+text+coalesce-key）→ events body 形状', asyn
   });
   const io = captureIo();
   const code = await main(
-    ['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--kind', 'codex', '--severity', 'error', '--text', '构建失败', '--coalesce-key', 'build-fail'],
+    [
+      '--base',
+      'http://127.0.0.1:8231/dsh-pet-7340',
+      '--kind',
+      'codex',
+      '--severity',
+      'error',
+      '--text',
+      '构建失败',
+      '--coalesce-key',
+      'build-fail',
+    ],
     { ...io, fetchImpl: impl },
   );
   assert.equal(code, 0);
@@ -190,7 +220,10 @@ test('main：notice（severity+text+coalesce-key）→ events body 形状', asyn
 test('main：--list-agents → GET /agents，原样打印，退出码 0', async () => {
   const { impl, calls } = fakeFetch({ '/agents': { body: { ok: true, agents: [{ agentId: 'a', kind: 'codex' }] } } });
   const io = captureIo();
-  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--list-agents'], { ...io, fetchImpl: impl });
+  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--list-agents'], {
+    ...io,
+    fetchImpl: impl,
+  });
   assert.equal(code, 0);
   assert.equal(calls[0].method, 'GET');
   assert.deepEqual(JSON.parse(io.out[0]), { ok: true, agents: [{ agentId: 'a', kind: 'codex' }] });
@@ -199,7 +232,10 @@ test('main：--list-agents → GET /agents，原样打印，退出码 0', async 
 test('main：桌宠不在场（hello 非 2xx）→ 退出码 1，stderr 明说（不静默）', async () => {
   const { impl, calls } = fakeFetch({ '/agents/hello': { status: 400, body: { error: 'bad' } } });
   const io = captureIo();
-  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--status', 'working'], { ...io, fetchImpl: impl });
+  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--status', 'working'], {
+    ...io,
+    fetchImpl: impl,
+  });
   assert.equal(code, 1);
   assert.equal(calls.length, 1, 'hello 就失败：不发 events');
   assert.match(io.err.join(''), /hello 失败/);
@@ -212,7 +248,10 @@ test('main：桌宠拒绝驱动（HTTP 200 + ok:false，如 no-active-pet）→ 
     '/events': { body: { ok: false, reason: 'no-active-pet', message: '没有可显示的桌宠' } },
   });
   const io = captureIo();
-  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--status', 'working'], { ...io, fetchImpl: impl });
+  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--status', 'working'], {
+    ...io,
+    fetchImpl: impl,
+  });
   assert.equal(code, 1, 'ok:false 是业务失败，退出码必须非零');
   assert.match(io.err.join(''), /no-active-pet/);
 });
@@ -222,7 +261,10 @@ test('main：网络失败（fetch 抛错）→ 退出码 1', async () => {
     throw new Error('connect ECONNREFUSED 127.0.0.1:8231');
   }) as unknown as typeof fetch;
   const io = captureIo();
-  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--status', 'working'], { ...io, fetchImpl: impl });
+  const code = await main(['--base', 'http://127.0.0.1:8231/dsh-pet-7340', '--status', 'working'], {
+    ...io,
+    fetchImpl: impl,
+  });
   assert.equal(code, 1);
   assert.match(io.err.join(''), /ECONNREFUSED|不可达/);
 });

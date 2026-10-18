@@ -16,11 +16,7 @@ export const TOOLS: McpTool[];
 export function kindFromClientInfo(clientInfo: unknown): string;
 
 /** tools/call 的 name+arguments → `/events` 请求体（纯函数；pet_agents 返回 null） */
-export function toolEventsBody(
-  name: string,
-  args: unknown,
-  ctx: { agentId: string },
-): Record<string, unknown> | null;
+export function toolEventsBody(name: string, args: unknown, ctx: { agentId: string }): Record<string, unknown> | null;
 
 export interface McpServer {
   /** 处理一条已解析的 JSON-RPC 消息；notification（无 id）→ null */

@@ -81,7 +81,10 @@ test('listLiveGateways：只返活 pid；坏文件/坏形状跳过；按 started
 });
 
 test('listLiveGateways：目录不存在 → 空数组（不抛）', () => {
-  assert.deepEqual(listLiveGateways('D:/no/such/dir', () => true), []);
+  assert.deepEqual(
+    listLiveGateways('D:/no/such/dir', () => true),
+    [],
+  );
 });
 
 test('discoverGatewayBase：目录命中 → url + routePrefix（不扫端口）', async () => {
@@ -149,7 +152,9 @@ function fakeFetch(handlers: Record<string, { status?: number; body?: unknown; t
 }
 
 test('helloAgent：POST /agents/hello，body = {agentId, kind}', async () => {
-  const { impl, calls } = fakeFetch({ '/agents/hello': { body: { ok: true, leaseId: 'L1', ttlSec: 60, granted: [] } } });
+  const { impl, calls } = fakeFetch({
+    '/agents/hello': { body: { ok: true, leaseId: 'L1', ttlSec: 60, granted: [] } },
+  });
   const r = await helloAgent('http://127.0.0.1:8231', { agentId: 'a@PC', kind: 'codex' }, { fetchImpl: impl });
   assert.equal(r.ok, true);
   assert.deepEqual(calls[0].body, { agentId: 'a@PC', kind: 'codex' });
@@ -159,7 +164,11 @@ test('helloAgent：POST /agents/hello，body = {agentId, kind}', async () => {
 
 test('postEvent：POST /events，body 原样透传', async () => {
   const { impl, calls } = fakeFetch({ '/events': { body: { ok: true } } });
-  const r = await postEvent('http://127.0.0.1:8231', { agentId: 'a@PC', status: 'working', task: 'x' }, { fetchImpl: impl });
+  const r = await postEvent(
+    'http://127.0.0.1:8231',
+    { agentId: 'a@PC', status: 'working', task: 'x' },
+    { fetchImpl: impl },
+  );
   assert.equal(r.ok, true);
   assert.deepEqual(calls[0].body, { agentId: 'a@PC', status: 'working', task: 'x' });
 });

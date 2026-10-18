@@ -31,10 +31,45 @@ export interface KnownAgent {
  * 行序 = 展示优先序（/admin 与 tooltip 摘要取 active 中优先级最高者时同序）。
  */
 export const KNOWN_AGENTS: readonly KnownAgent[] = [
-  { kind: 'workbuddy', name: 'WorkBuddy', emoji: '🧰', color: '#6366f1', tag: 'WB', transports: ['mcp', 'cli', 'http'], mcp: true, hookHint: 'docs 接入指南 §MCP' },
-  { kind: 'codex', name: 'Codex', emoji: '🤖', color: '#10a37f', tag: 'CX', transports: ['mcp', 'cli', 'http'], mcp: true, hookHint: 'docs 接入指南 §CLI' },
-  { kind: 'claude-code', name: 'Claude Code', emoji: '🐈', color: '#d97757', tag: 'CC', transports: ['cli', 'http'], mcp: true, hookHint: 'hooks: Stop' },
-  { kind: 'custom', name: '自定义脚本', emoji: '📜', color: '#6b7280', tag: 'DIY', transports: ['http', 'cli'], mcp: false },
+  {
+    kind: 'workbuddy',
+    name: 'WorkBuddy',
+    emoji: '🧰',
+    color: '#6366f1',
+    tag: 'WB',
+    transports: ['mcp', 'cli', 'http'],
+    mcp: true,
+    hookHint: 'docs 接入指南 §MCP',
+  },
+  {
+    kind: 'codex',
+    name: 'Codex',
+    emoji: '🤖',
+    color: '#10a37f',
+    tag: 'CX',
+    transports: ['mcp', 'cli', 'http'],
+    mcp: true,
+    hookHint: 'docs 接入指南 §CLI',
+  },
+  {
+    kind: 'claude-code',
+    name: 'Claude Code',
+    emoji: '🐈',
+    color: '#d97757',
+    tag: 'CC',
+    transports: ['cli', 'http'],
+    mcp: true,
+    hookHint: 'hooks: Stop',
+  },
+  {
+    kind: 'custom',
+    name: '自定义脚本',
+    emoji: '📜',
+    color: '#6b7280',
+    tag: 'DIY',
+    transports: ['http', 'cli'],
+    mcp: false,
+  },
 ];
 
 /** 渲染层唯一入口的返回：已知 → 注册表元数据；未知 → 降级（known=false） */
@@ -70,5 +105,12 @@ export function agentMeta(kind: string): AgentMeta {
   // 按码点切（与 host/work-status.ts 的 TASK_TEXT_MAX 同口径：不把代理对截成半个字符）
   const points = Array.from(key);
   const name = points.length > UNKNOWN_NAME_MAX ? `${points.slice(0, UNKNOWN_NAME_MAX).join('')}…` : key;
-  return { kind: key, name, emoji: UNKNOWN_FALLBACK.emoji, color: UNKNOWN_FALLBACK.color, tag: UNKNOWN_FALLBACK.tag, known: false };
+  return {
+    kind: key,
+    name,
+    emoji: UNKNOWN_FALLBACK.emoji,
+    color: UNKNOWN_FALLBACK.color,
+    tag: UNKNOWN_FALLBACK.tag,
+    known: false,
+  };
 }

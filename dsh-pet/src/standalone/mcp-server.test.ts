@@ -28,7 +28,10 @@ function asStdin(stream: PassThrough): NonNullable<ServeStdioOptions>['stdin'] {
 }
 
 /** 起 serveStdio：写出口与退出码进 sink */
-function serveCaptured(server: McpServer, stdin: PassThrough): { written: string[]; exits: number[]; done: Promise<void> } {
+function serveCaptured(
+  server: McpServer,
+  stdin: PassThrough,
+): { written: string[]; exits: number[]; done: Promise<void> } {
   const written: string[] = [];
   const exits: number[] = [];
   const done = serveStdio(server, {
@@ -104,7 +107,12 @@ test('initialize：回 protocolVersion/serverInfo/capabilities，并按 clientIn
   assert.equal(calls.length, 0, 'initialize 不碰网络');
 
   // clientInfo=WorkBuddy → kind=workbuddy、agentId=workbuddy@MOCK-PC（随后 tools/call 带上）
-  await roundTrip(server, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'pet_status', arguments: { status: 'working' } } });
+  await roundTrip(server, {
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: { name: 'pet_status', arguments: { status: 'working' } },
+  });
   const hello = calls.find((c) => c.url.includes('/agents/hello'));
   assert.ok(hello, 'tools/call 前必须先 hello');
   assert.deepEqual(hello?.body, { agentId: 'workbuddy@MOCK-PC', kind: 'workbuddy' });
@@ -129,7 +137,10 @@ test('tools/list：三个 tool 齐整（pet_status / pet_notice / pet_agents）'
   const server = makeServer(happyFetch().impl);
   const res = await roundTrip(server, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const tools = (res?.result as { tools: Array<{ name: string }> }).tools;
-  assert.deepEqual(tools.map((t) => t.name), ['pet_status', 'pet_notice', 'pet_agents']);
+  assert.deepEqual(
+    tools.map((t) => t.name),
+    ['pet_status', 'pet_notice', 'pet_agents'],
+  );
   // inputSchema 必备项在（agent 侧据此生成调用）
   const status = TOOLS.find((t) => t.name === 'pet_status');
   assert.deepEqual((status?.inputSchema as { required: string[] }).required, ['status']);
@@ -155,7 +166,12 @@ test('未知方法 → -32601；未知 tool → -32602', async () => {
   const server = makeServer(happyFetch().impl);
   const m = await roundTrip(server, { jsonrpc: '2.0', id: 3, method: 'nope/nope' });
   assert.equal((m?.error as { code: number }).code, -32601);
-  const t = await roundTrip(server, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'pet_destroy', arguments: {} } });
+  const t = await roundTrip(server, {
+    jsonrpc: '2.0',
+    id: 4,
+    method: 'tools/call',
+    params: { name: 'pet_destroy', arguments: {} },
+  });
   assert.equal((t?.error as { code: number }).code, -32602);
 });
 
@@ -238,7 +254,12 @@ test('tools/call pet_notice：notice 段形状正确（severity/text/coalesceKey
 test('tools/call pet_agents：GET /agents，text 是响应 JSON', async () => {
   const { impl, calls } = happyFetch();
   const server = makeServer(impl);
-  const res = await roundTrip(server, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'pet_agents', arguments: {} } });
+  const res = await roundTrip(server, {
+    jsonrpc: '2.0',
+    id: 5,
+    method: 'tools/call',
+    params: { name: 'pet_agents', arguments: {} },
+  });
   const result = res?.result as { content: Array<{ text: string }> };
   assert.deepEqual(JSON.parse(result.content[0].text), { ok: true, agents: [{ agentId: 'a', kind: 'codex' }] });
   const get = calls.find((c) => c.url.endsWith('/agents'));
@@ -286,8 +307,17 @@ test('stdin close → 尽力 POST /events {status:idle} → exit 0', async () =>
   const { written, exits, done } = serveCaptured(server, stdin);
 
   // 喂三行：initialize / tools/call / ping，然后关管道（模拟 agent 退出）
-  stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'codex' } } }) + '\n');
-  stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'pet_status', arguments: { status: 'working' } } }) + '\n');
+  stdin.write(
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'codex' } } }) + '\n',
+  );
+  stdin.write(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'pet_status', arguments: { status: 'working' } },
+    }) + '\n',
+  );
   stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' }) + '\n');
   stdin.end();
 
@@ -295,7 +325,14 @@ test('stdin close → 尽力 POST /events {status:idle} → exit 0', async () =>
   assert.deepEqual(exits, [0], 'stdin close 后 exit(0)');
   assert.equal(written.length, 3, '三行请求三行响应（notification 才不回）');
   const idle = calls.filter((c) => c.url.endsWith('/events')).map((c) => c.body);
-  assert.deepEqual(idle, [{ agentId: 'codex@MOCK-PC', status: 'working' }, { agentId: 'codex@MOCK-PC', status: 'idle' }], '收尾必须补发 idle');
+  assert.deepEqual(
+    idle,
+    [
+      { agentId: 'codex@MOCK-PC', status: 'working' },
+      { agentId: 'codex@MOCK-PC', status: 'idle' },
+    ],
+    '收尾必须补发 idle',
+  );
 });
 
 test('stdin close：从没 initialize 过 → 不发 idle（没登记过无需收敛），仍 exit 0', async () => {
@@ -313,7 +350,11 @@ test('stdin close：从没 initialize 过 → 不发 idle（没登记过无需�
 test('stdin close：idle 发送失败（网络断）也 exit 0（收敛尽力而为，TTL 兜底）', async () => {
   const impl = (async (url: string) => {
     if (String(url).includes('/events')) throw new Error('connect ECONNREFUSED');
-    return { ok: true, status: 200, text: async () => '{"ok":true,"leaseId":"L1","ttlSec":60,"granted":[]}' } as unknown as Response;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '{"ok":true,"leaseId":"L1","ttlSec":60,"granted":[]}',
+    } as unknown as Response;
   }) as unknown as typeof fetch;
   const server = makeServer(impl);
   const stdin = new PassThrough();
@@ -329,10 +370,15 @@ test('尾巴上没换行的残行也当一行处理（个别 client 最后一帧
   const server = makeServer(impl);
   const stdin = new PassThrough();
   const { written, exits, done } = serveCaptured(server, stdin);
-  stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'codex' } } })); // 无 \n
+  stdin.write(
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'codex' } } }),
+  ); // 无 \n
   stdin.end();
   await done;
   assert.equal(written.length, 1, '残行也被处理并回包');
   assert.deepEqual(exits, [0]);
-  assert.ok(calls.some((c) => c.url.endsWith('/events')), 'initialize 后 close → 发 idle');
+  assert.ok(
+    calls.some((c) => c.url.endsWith('/events')),
+    'initialize 后 close → 发 idle',
+  );
 });

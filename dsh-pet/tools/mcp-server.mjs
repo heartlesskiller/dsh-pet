@@ -210,7 +210,8 @@ export function createMcpServer(options = {}) {
             jsonrpc: '2.0',
             id,
             result: {
-              protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : DEFAULT_PROTOCOL_VERSION,
+              protocolVersion:
+                typeof params.protocolVersion === 'string' ? params.protocolVersion : DEFAULT_PROTOCOL_VERSION,
               serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
               capabilities: { tools: {} },
             },

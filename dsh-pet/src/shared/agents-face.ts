@@ -79,7 +79,8 @@ export function readAgents(data: unknown): AgentsFaceView | null {
   if (!o) return null;
   if (!Array.isArray(o.agents)) return null;
   const agents = o.agents.map(parseItem).filter((a): a is AgentFaceItem => a !== undefined);
-  const activeCount = typeof o.activeCount === 'number' && Number.isFinite(o.activeCount) ? o.activeCount : countActive(agents);
+  const activeCount =
+    typeof o.activeCount === 'number' && Number.isFinite(o.activeCount) ? o.activeCount : countActive(agents);
   return { agents, activeCount };
 }
 
@@ -144,9 +145,7 @@ import type { ReactElement } from 'react';
  * 它服务于 dev 验收脚本的 SSR 断言与 Phase 2 的右键菜单子菜单，先立住契约。
  * 样式自包含（AGENTS_FACE_CSS）：shared 不 import client 的 CSS。
  */
-export function makeAgentsFace(
-  rt: { h: typeof jsx },
-): (props: { view: AgentsFaceView; on: boolean }) => ReactElement {
+export function makeAgentsFace(rt: { h: typeof jsx }): (props: { view: AgentsFaceView; on: boolean }) => ReactElement {
   const { h } = rt;
   return function AgentsFace({ view, on }: { view: AgentsFaceView; on: boolean }): ReactElement {
     if (view.agents.length === 0) {

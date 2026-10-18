@@ -378,7 +378,14 @@ async function handleRelays(req, res, method, pathname) {
 const AGENT_TTL_MS = 60_000;
 /** status 六态 → 工作状态档位（与 host gateway/ingest.ts 的 statusToWorkState 同口径） */
 const statusToWorkState = (status) =>
-  ({ idle: null, thinking: 'thinking', working: 'working', 'waiting-approval': 'waiting', done: 'success', error: 'error' })[status];
+  ({
+    idle: null,
+    thinking: 'thinking',
+    working: 'working',
+    'waiting-approval': 'waiting',
+    done: 'success',
+    error: 'error',
+  })[status];
 
 const agentStore = {
   entries: new Map(),
@@ -535,13 +542,16 @@ async function handleAgents(req, res, method, pathname) {
     if (hasStatus && statusToWorkState(o.status) === undefined) return bad(400, '未知 status');
     if (hasNotice) {
       const n = o.notice && typeof o.notice === 'object' ? o.notice : {};
-      if (!['info', 'warning', 'error'].includes(n.severity)) return bad(400, 'notice.severity 必须是 info / warning / error');
+      if (!['info', 'warning', 'error'].includes(n.severity))
+        return bad(400, 'notice.severity 必须是 info / warning / error');
       if (typeof n.text !== 'string' || !n.text.trim()) return bad(400, 'notice.text 不能为空');
     }
     if (hasStatus) {
       const state = statusToWorkState(o.status);
-      if (state === null) statusStore.delete(agentId); // idle = 清会话
-      else statusStore.set(agentId, { state, task: typeof o.task === 'string' && o.task.trim() ? o.task.trim() : null });
+      if (state === null)
+        statusStore.delete(agentId); // idle = 清会话
+      else
+        statusStore.set(agentId, { state, task: typeof o.task === 'string' && o.task.trim() ? o.task.trim() : null });
     }
     return sendJson(res, 200, { ok: true });
   }

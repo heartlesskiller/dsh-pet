@@ -157,7 +157,9 @@ async function request(url, init, { timeoutMs = 5000, fetchImpl = fetch } = {}) 
  * `--base http://127.0.0.1:3080/dsh-pet-7340`（全路径）两种给法都收。
  */
 function normalizeBase(base) {
-  const trimmed = String(base ?? '').trim().replace(/\/+$/, '');
+  const trimmed = String(base ?? '')
+    .trim()
+    .replace(/\/+$/, '');
   if (!trimmed) return '';
   return trimmed.endsWith(ROUTE_PREFIX) ? trimmed : trimmed + ROUTE_PREFIX;
 }

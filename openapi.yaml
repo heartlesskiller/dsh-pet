@@ -1103,7 +1103,8 @@ paths:
                   description: |
                     任务详情（与 `status` 同段；≤40 码点，超长 400，不静默截断）。
                     落在同一合成会话 `http:<agentId>` 的条目上，随会话同生共死；
-                    `status:idle` 时不要带（会被清掉，显式 400）。
+                    **task 必须随 status 给**（无 status 的 task → 400，不静默丢弃）；
+                    `status:idle` 时也不要带（会被清掉，显式 400）。
                 petId:
                   type: string
                   description: 气泡目标宠物（缺省 = 当前桌宠）

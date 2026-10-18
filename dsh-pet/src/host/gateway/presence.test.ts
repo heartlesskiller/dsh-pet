@@ -8,11 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { AgentRegistry } from './agents.ts';
-import {
-  createPresenceProjector,
-  type AgentsSectionData,
-  type PresenceDeps,
-} from './presence.ts';
+import { createPresenceProjector, type AgentsSectionData, type PresenceDeps } from './presence.ts';
 import type { HostWorkStatusState } from '../work-status';
 
 /** 造一套：假时钟 + registry + 合成会话表 + 写入记录器 */

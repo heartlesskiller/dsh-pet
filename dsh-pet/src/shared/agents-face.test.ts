@@ -25,7 +25,14 @@ function item(over: Partial<AgentsFaceView['agents'][number]>): AgentsFaceView['
 test('readAgents：合法形状 → 视图（字段收窄，未知档位落 null）', () => {
   const v = readAgents({
     agents: [
-      { agentId: 'workbuddy@PC', kind: 'workbuddy', state: 'working', task: 'pnpm test', lastSeenAt: 5, expiresAt: 65_000 },
+      {
+        agentId: 'workbuddy@PC',
+        kind: 'workbuddy',
+        state: 'working',
+        task: 'pnpm test',
+        lastSeenAt: 5,
+        expiresAt: 65_000,
+      },
       { agentId: 'ghost@PC', kind: 'mystery', state: 'bogus', task: 42, lastSeenAt: 'x', expiresAt: null },
     ],
     activeCount: 1,

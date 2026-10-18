@@ -36,7 +36,9 @@ const ORIGIN = `http://127.0.0.1:${PORT}`;
 const BASE = `${ORIGIN}/dsh-pet-7340/state`;
 
 // ---- 自起 mock-server（子进程；验收结束无论成败都收掉） ----
-const mock = spawn(process.execPath, [join(here, 'mock-server.mjs'), String(PORT)], { stdio: ['ignore', 'pipe', 'inherit'] });
+const mock = spawn(process.execPath, [join(here, 'mock-server.mjs'), String(PORT)], {
+  stdio: ['ignore', 'pipe', 'inherit'],
+});
 await new Promise<void>((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('mock-server 启动超时')), 10_000);
   mock.stdout.on('data', (chunk: Buffer) => {
