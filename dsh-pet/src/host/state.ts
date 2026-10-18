@@ -30,8 +30,10 @@ export interface StateLeaf {
   data: unknown;
 }
 
-/** 全局段（所有端共享一份） */
-export type SectionName = 'balance' | 'workStatus' | 'notify' | 'relays';
+/** 全局段（所有端共享一份）。
+ *  agents = 在场 agent 列表投影（docs/19 §4.2：与 workStatus 同源、分工不同——
+ *  workStatus 答「该播哪档」，agents 答「谁在场、各自什么状态」） */
+export type SectionName = 'balance' | 'workStatus' | 'notify' | 'relays' | 'agents';
 
 /** 每宠物段（say = 要说的话；anim = 要播的动画名） */
 export type PetLeafName = 'say' | 'anim';
@@ -61,7 +63,13 @@ export class PollStateStore {
 
   constructor() {
     this.last = 0;
-    this.sections = { balance: emptyLeaf(), workStatus: emptyLeaf(), notify: emptyLeaf(), relays: emptyLeaf() };
+    this.sections = {
+      balance: emptyLeaf(),
+      workStatus: emptyLeaf(),
+      notify: emptyLeaf(),
+      relays: emptyLeaf(),
+      agents: emptyLeaf(),
+    };
     this.pets = new Map();
     this.listeners = new Set();
   }

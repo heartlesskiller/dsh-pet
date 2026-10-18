@@ -219,3 +219,30 @@ describe('WorkStatusStore —— 按会话聚合与展示（issue #59）', () =>
     }
   });
 });
+
+describe('entryOf —— sections.agents 投影器的读取口（docs/19 §4.2）', () => {
+  test('有条目 → { state, task } 副本；改返回值不动内部态', () => {
+    const s = new WorkStatusStore();
+    s.setState('http:wb', 'working', 3);
+    s.setTask('http:wb', 'pnpm test');
+    const entry = s.entryOf('http:wb');
+    assert.deepEqual(entry, { state: 'working', task: 'pnpm test' });
+    if (!entry) return;
+    entry.task = '被调用方改了';
+    assert.equal(s.snapshot().task, 'pnpm test', '返回副本：调用方改不动内部态');
+  });
+
+  test('无条目 / 已清 → undefined（投影器据此落 null，不猜）', () => {
+    const s = new WorkStatusStore();
+    assert.equal(s.entryOf('http:none'), undefined);
+    s.setState('http:a', 'thinking', 1);
+    s.clear('http:a');
+    assert.equal(s.entryOf('http:a'), undefined);
+  });
+
+  test('与 stateOf 一致：同一会话两个口子不会给出不同档位', () => {
+    const s = new WorkStatusStore();
+    s.setState('http:x', 'waiting', 1);
+    assert.equal(s.entryOf('http:x')?.state, s.stateOf('http:x'));
+  });
+});

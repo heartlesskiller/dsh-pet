@@ -100,6 +100,7 @@ dsh plugin --profile web add file:D:/path/to/dsh-pet/dsh-pet
 - **余额展示**：按已用百分比分档播余额动画 + 头顶联想气泡（10 秒自动消失）；DeepSeek 显示账户余额，OpenCode Zen Go 与 Command Code 显示最紧迫的一个额度窗口；**未登记余额接口的服务商改为弹文字说明**（不静默）；按宠物独立开关
 - **碎碎念与对话**：碎碎念按周期自动生成一句（说话动画 + 气泡，也可手动触发）；对话在右键弹输入框与宠物聊天，记忆持久化（浏览器 / 桌面共享同一份）
 - **工作状态联动**：监听 DSH 会话事件，切「思考 / 工作 / 整理 / 等待 / 成功 / 出错」档位动画 + 常驻气泡；目标多轮任务只在真正收尾轮庆祝
+- **适配任意 agent**：WorkBuddy / Codex / Claude Code / 自己的脚本都能驱动桌宠（HTTP / CLI / MCP 三种 transport，协议只有一份）；悬停出 agent 摘要，`/admin` 列在场列表
 - **系统通知**：窗口失焦时弹系统 toast（对话完成 / 生成失败 / 输出截断 / 权限申请 / 用户选择）
 - **桌面模式（可选）**：每只宠物开一个独立透明置顶局部小窗，与浏览器严格同行为、共用同一份素材与纯逻辑（见下节）
 - **pet pack（额外宠物种类）**：`pet/` 下建 `种类名-config.json` + `种类名-animation/` 即新增独立动画池与素材的全新种类，多实例共享素材（见「配置 → 方式四」）
@@ -110,7 +111,7 @@ dsh plugin --profile web add file:D:/path/to/dsh-pet/dsh-pet
 
 桌宠不只自己玩，也**对外开放一套 HTTP 接口**，让别的插件或脚本能驱动它、读它的状态。
 
-- **能做什么**：让它说一句指定的话、播一段指定动画、与它对话；读它当前说的话、工作状态、系统通知与余额
+- **能做什么**：让它说一句指定的话、播一段指定动画、与它对话；读它当前说的话、工作状态、系统通知、余额与在场 agent
 - **为什么开放**：桌宠不该只是个摆设——比如一个「女仆」插件巡检验完想说句话，就能让桌宠当它的「实体」开口；也方便任何人基于它做二次开发
 - **怎么调**：挂在 DSH 自己的 Web 服务上（前缀 `/dsh-pet-7340`，只监听本机、无鉴权）。动作类接口只回 `{ok}`，数据统一从 `GET /state` 读
 
@@ -191,6 +192,32 @@ npm run build && npm run standalone   # 仓库里（先构建）
 - **档位动画**：`animations.events.workStatus` 数组，索引即档位（勿在中间插入新档，只可追加末尾）
 - **气泡文案**：`workStatusTexts` 每档可配多句随机，任务详情（todo）优先
 - **档位候选数组**：任意档位槽位可写 `string | string[]`——数组 = 档内随机抽 1，循环播放自动轮换、避免连播同一段（余额 / 碎碎念档位同样适用）
+
+## 🤖 适配任意 agent（WorkBuddy / Codex / Claude Code / 脚本）
+
+桌宠不只服务 DSH——**任意 agent 都能驱动它**：切六档工作状态动画、弹气泡、报任务详情。协议只有一份（`POST /events`），三种 transport 都序列化成它，按 agent 的形态选：
+
+| transport | 适合谁 | 怎么接 |
+| --- | --- | --- |
+| **HTTP（curl）** | 任何能发 HTTP 的脚本 / cron | `curl -X POST http://127.0.0.1:3080/dsh-pet-7340/events -H 'content-type: application/json' -d '{"agentId":"me","status":"working","task":"pnpm test"}'` |
+| **CLI** | hook 脚本 / 没有 MCP 的 agent | `node tools/dsh-pet-notify.mjs --kind workbuddy --status working --task "pnpm test"` |
+| **MCP server** | 有 MCP client 的 agent（WorkBuddy / Codex / Claude Code） | 在 agent 的 MCP 配置里指向 `tools/mcp-server.mjs`（见下） |
+
+**MCP 配置片段**（stdio 形态；路径用仓库实际位置，Phase 1 按仓库路径引用）：
+
+```jsonc
+// 形状：{ "mcpServers": { "dsh-pet": { "command": "node", "args": ["<仓库>/dsh-pet/tools/mcp-server.mjs"] } } }
+// WorkBuddy / Claude Code 直接可用；Codex 按实际配置形态适配
+```
+
+暴露三个 tool：`pet_status`（六档 + task）/ `pet_notice`（气泡）/ `pet_agents`（在场列表）。
+agent 退出时 MCP server 的 stdio 关闭 → 自动补发 `status:idle`（收敛 ~0s）；CLI 轨由 hook 在 on-stop 时调
+`--status idle`；崩溃被杀则由 TTL 60s + 5s 投影兜底（≤65s）。
+
+**看到的效果**：桌宠按六档播动画、悬停桌宠出摘要（「🧰 WorkBuddy · pnpm test」）、
+独立模式 `/admin` 页列出在场 agent（未登记的类型降级显示，不拒绝接入）。
+完整契约见 [`API.md`](API.md) 第六节与 [`openapi.yaml`](openapi.yaml)，设计依据
+[`docs/19-agent-adapter-design.md`](docs/19-agent-adapter-design.md)。
 
 ## ⚙️ 配置（大小 / 位置 / 多开）
 

@@ -1058,7 +1058,8 @@ paths:
         **不新造状态通道。**
 
         互斥规则：`/capabilities` 的 `hostCapabilities.sessionEvents === 'dsh'` 时（DSH 会话事件在场），
-        `status` 段被忽略，只处理 `notice`——避免六档被两个源同时改写而抖动。
+        `status` 段被忽略，只处理 `notice`——避免六档被两个源同时改写而抖动。**`task` 与 `status`
+        同段同开关**（它俩挂同一条合成会话条目，只放一个会造出「DSH 档位配 HTTP 文案」的拼接态）。
 
         coalesce：同 `coalesceKey` 在 5s 窗口内、且优先级未升级 → 静默合并（不重复弹）；
         `error` 永远能穿透 `warning` 的合并窗口（告警升级不该被吞）。
@@ -1097,6 +1098,12 @@ paths:
                   type: string
                   enum: [idle, thinking, working, waiting-approval, done, error]
                   description: "六档驱动；idle = 清会话回空闲"
+                task:
+                  type: string
+                  description: |
+                    任务详情（与 `status` 同段；≤40 码点，超长 400，不静默截断）。
+                    落在同一合成会话 `http:<agentId>` 的条目上，随会话同生共死；
+                    `status:idle` 时不要带（会被清掉，显式 400）。
                 petId:
                   type: string
                   description: 气泡目标宠物（缺省 = 当前桌宠）
@@ -1624,7 +1631,7 @@ components:
         sections:
           type: object
           description: 全局段（所有端共享一份）
-          required: [balance, workStatus, notify, relays]
+          required: [balance, workStatus, notify, relays, agents]
           properties:
             balance:
               $ref: "#/components/schemas/BalanceLeaf"
@@ -1634,6 +1641,8 @@ components:
               $ref: "#/components/schemas/NotifyLeaf"
             relays:
               $ref: "#/components/schemas/RelayLeaf"
+            agents:
+              $ref: "#/components/schemas/AgentsLeaf"
         pets:
           type: object
           description: 每只宠物各自一份；键是宠物 id（**可含点号，勿切分**）
@@ -2528,6 +2537,60 @@ components:
                   type: string
                   format: date-time
             - type: "null"
+
+    AgentsLeaf:
+      type: object
+      required: [counter, data]
+      description: |
+        `sections.agents` 状态叶（docs/19 §4.2 在场投影）。与 `sections.workStatus`
+        **同源分工**：workStatus 答「桌宠该播哪档动画」（单值仲裁），agents 答
+        「谁在场、各自什么状态、谁在干活」（列表投影）。签名不变不写（counter 不空转）；
+        没有 agent 在场时写空列表（**不是 null**——「查不到就是空数组」）。
+      properties:
+        counter:
+          $ref: "#/components/schemas/Counter"
+        data:
+          $ref: "#/components/schemas/AgentsSectionData"
+
+    AgentsSectionData:
+      type: object
+      required: [agents, activeCount]
+      properties:
+        agents:
+          type: array
+          description: 在场条目（按 agentId 排序，与 `GET /agents` 一致）
+          items:
+            $ref: "#/components/schemas/AgentPresenceItem"
+        activeCount:
+          type: integer
+          description: state ∈ thinking/working/result/waiting/error 的个数（success 终态与空闲不算）
+
+    AgentPresenceItem:
+      type: object
+      required: [agentId, kind, state, task, lastSeenAt, expiresAt]
+      properties:
+        agentId:
+          type: string
+        kind:
+          type: string
+          description: 原始 kind 字符串（展示元数据与降级在客户端注册表，host 只搬运）
+        state:
+          description: 该 agent 合成会话 `http:<agentId>` 的当前档位；无会话 → null
+          oneOf:
+            - type: string
+              enum: [thinking, working, result, waiting, success, error]
+            - type: "null"
+        task:
+          description: 该 agent 的任务详情（`POST /events` 的 task 段透传；≤40 码点）
+          oneOf:
+            - type: string
+            - type: "null"
+        lastSeenAt:
+          type: integer
+          description: epoch ms（最近一次 hello）
+        expiresAt:
+          type: integer
+          description: epoch ms（TTL 60s）
 
     # ---------- 宿主无关网关（T07） ----------
 

@@ -12,19 +12,22 @@
  *     （单槽、后到覆盖先到；客户端 1s 轮询 /state 后弹气泡，两端零改动）；
  *   - `status`（六档工作状态）→ `sections.workStatus`：经 WorkStatusStore 按会话聚合
  *     （合成会话 id `http:<agentId>`，终态 60s 自动清理复用上游 scheduleTerminalCleanup 的口径，
- *      由 index.ts 的 setWorkStatus 注入实现）。
+ *      由 index.ts 的 setWorkStatus 注入实现）；
+ *   - `task`（任务详情）→ 同一合成会话条目的 task 字段（docs/19 T02：与 status 同段同开关，
+ *     上限 40 码点复用 work-status.ts 的 TASK_TEXT_MAX，不另立标准）；
  *   - **不新造状态通道**：两个目标叶子都是既有叶子，counter 地基不变。
  *
- * ## 互斥规则（07 §4.2）
+ * ## 互斥规则（07 §4.2，docs/19 扩展到 task）
  * `sessionEvents` 能力已被 DSH 填上时（DSH 会话事件在场），`status` 段**被忽略**（只处理 notice），
- * 避免六档档位被两个源同时改写而抖动。/capabilities 的 hostCapabilities.sessionEvents 会告诉
- * agent 当前是哪个源（dsh / http / none）。
+ * 避免六档档位被两个源同时改写而抖动。**task 与 status 同段同开关**（它俩挂同一条会话条目，
+ * 只放一个进来会造出「DSH 的档位配 HTTP 的文案」这种拼接态）。/capabilities 的
+ * hostCapabilities.sessionEvents 会告诉 agent 当前是哪个源（dsh / http / none）。
  *
  * ## severity → priority（ACP 语义原样采用）
  *   info → 0（普通气泡）/ warning → 10（升级）/ error → 20（最高）。
  * 用途：同 coalesceKey 的去重窗口内，**更高优先级放行**（告警升级不该被合并窗口吞掉）。
  */
-import type { HostWorkStatusState } from '../work-status';
+import { TASK_TEXT_MAX, type HostWorkStatusState } from '../work-status';
 import type { RouteResult } from '../route-result';
 
 /** notice 严重度（借自 ACP notice.severity；三值，不扩展） */
@@ -82,6 +85,8 @@ export interface EventsInput {
   sessionId?: unknown;
   notice?: NoticeInput;
   status?: unknown;
+  /** 任务详情（docs/19 T02：与 status 同段——随合成会话条目走，≤40 码点） */
+  task?: unknown;
   /** 气泡目标宠物（扩展字段：缺省 = 当前桌宠）。发现文件/握手不管气泡去向，这里管 */
   petId?: unknown;
 }
@@ -90,8 +95,8 @@ export interface EventsInput {
 export interface IngestOptions {
   /** 写气泡（pets.<id>.say）；payload 带 severity/priority 供客户端择优渲染（不认识就忽略） */
   pushSay: (petId: string, payload: { text: string; severity: NoticeSeverity; priority: number }) => void;
-  /** 写六档工作状态（null = 清该 agent 的合成会话回空闲） */
-  setWorkStatus: (agentId: string, state: HostWorkStatusState | null) => void;
+  /** 写六档工作状态（null = 清该 agent 的合成会话回空闲）；task 随该会话条目走（null = 不动/清空见实现） */
+  setWorkStatus: (agentId: string, state: HostWorkStatusState | null, task: string | null) => void;
   /** 解析气泡目标宠物（requested 缺省 = 当前桌宠）；'' = 没有可显示的桌宠 */
   resolvePetId: (requested: string | undefined) => string;
   /** DSH 会话事件在场 → status 段忽略（互斥规则） */
@@ -140,6 +145,10 @@ export function ingestEvent(raw: unknown, options: IngestOptions): RouteResult {
   const hasNotice = o.notice !== undefined && o.notice !== null;
   const hasStatus = o.status !== undefined && o.status !== null;
   if (!hasNotice && !hasStatus) return badRequest('notice 或 status 至少给一个');
+  // task 只能挂在 status 段上（它落在该 agent 的合成会话条目上）——单独给会被静默丢，明说
+  if (!hasStatus && o.task !== undefined && o.task !== null) {
+    return badRequest('task 需要与 status 一起给（它挂在该 agent 的合成会话条目上）');
+  }
 
   // ---- notice 段校验（结构错 → 400）----
   let notice: { text: string; severity: NoticeSeverity; priority: number; coalesceKey?: string } | undefined;
@@ -169,11 +178,23 @@ export function ingestEvent(raw: unknown, options: IngestOptions): RouteResult {
     notice = { text, severity: n.severity as NoticeSeverity, priority, ...(coalesceKey ? { coalesceKey } : {}) };
   }
 
-  // ---- status 段校验（DSH 在场时整段忽略，见模块头的互斥规则）----
+  // ---- status 段校验（DSH 在场时整段忽略，见模块头的互斥规则；task 同段同开关）----
   let workState: HostWorkStatusState | null | undefined;
+  let task: string | null = null;
   if (hasStatus && options.sessionEventsOwned !== true) {
     workState = statusToWorkState(o.status);
     if (workState === undefined) return badRequest('status 必须是 idle/thinking/working/waiting-approval/done/error');
+    // task 与 status 同段：上限 40 码点（复用 work-status.ts 的 TASK_TEXT_MAX，不开第二标准）；
+    // 码点计、不静默截断（与 notice.text 同口径：超长 400，让调用方自己改）
+    if (o.task !== undefined && o.task !== null) {
+      if (typeof o.task !== 'string') return badRequest('task 必须是字符串');
+      const trimmed = o.task.trim();
+      if (!trimmed) return badRequest('task 不能为空（要清空请随 status:idle 一并发）');
+      if (workState === null) return badRequest('status:idle 是清会话回空闲，不要同时带 task（会被清掉，明说）');
+      const points = Array.from(trimmed);
+      if (points.length > TASK_TEXT_MAX) return badRequest(`task 过长（限 ${TASK_TEXT_MAX} 码点）`);
+      task = trimmed;
+    }
   }
 
   try {
@@ -195,7 +216,7 @@ export function ingestEvent(raw: unknown, options: IngestOptions): RouteResult {
     if (notice && petId) {
       options.pushSay(petId, { text: notice.text, severity: notice.severity, priority: notice.priority });
     }
-    if (workState !== undefined) options.setWorkStatus(agentId, workState);
+    if (workState !== undefined) options.setWorkStatus(agentId, workState, task);
     return { kind: 'json', status: 200, obj: { ok: true } };
   } catch (e) {
     return {

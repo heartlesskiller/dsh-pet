@@ -90,6 +90,24 @@ describe('takeChanged —— counter 变了才算变化', () => {
       ['pets.a.b.say'],
     );
   });
+
+  test('新 section 自动纳入：sections.agents 无需改 state.ts 就被捕获（docs/19 A5）', () => {
+    // T04 已证 relays 走通同一条路；agents 是同一手法——通配遍历 sections 全键。
+    const baseline: Record<string, number> = {};
+    const s = makeState({
+      agents: [
+        7,
+        { agents: [{ agentId: 'wb', kind: 'workbuddy', state: 'working', task: 'pnpm test' }], activeCount: 1 },
+      ],
+    });
+    assert.equal(flattenCounters(s)['sections.agents'], 7, '首拉基线含 agents');
+    const changes = takeChanged(s, baseline);
+    assert.deepEqual(
+      changes.map((c) => c.path),
+      ['sections.agents'],
+    );
+    assert.deepEqual(takeChanged(s, baseline), [], '同内容不重复产出');
+  });
 });
 
 describe('readBalance —— 余额叶子 → 客户端视图', () => {

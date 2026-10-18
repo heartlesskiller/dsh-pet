@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { ADMIN_PAGE_PATH, renderAdminPage } from './admin-page.ts';
+import { KNOWN_AGENTS } from '../shared/agents.ts';
 
 /** 一组「像凭证」的假明文：只要有一个出现在 HTML 里就说明零数据嵌入被破坏 */
 const FAKE_SECRETS = [
@@ -60,6 +61,15 @@ const REQUIRED_MARKERS: Array<[string, string]> = [
   ['模型矩阵表头行', 'id="matrix-head-row"'],
   ['矩阵加载按钮', 'id="matrix-load"'],
   ['矩阵未知提示', 'id="matrix-hint"'],
+  // 「接入的 agent」区块（docs/19 T03）
+  ['agent 区块标题', '接入的 agent'],
+  ['agent 区块', 'id="agents-section"'],
+  ['agent 行容器', 'id="agents-rows"'],
+  ['agent 表格', 'id="agents-table"'],
+  ['agent 刷新按钮', 'id="agents-refresh"'],
+  ['agent 汇总区', 'id="agents-summary"'],
+  ['agent 未知 kind 降级', "'👾 ' + a.kind"],
+  ['agent 空态文案', '当前没有 agent 在场'],
   ['三态文案-有', "'有'"],
   ['三态文案-无', "'无'"],
   ['三态文案-未知', "'未知'"],
@@ -85,6 +95,7 @@ const REQUIRED_API_PATHS = [
   "'/relays/detect'",
   "'/relays/focus'",
   "'/state'",
+  "'/agents'", // 在场 agent 权威列表（docs/19 T03）
 ];
 
 test('renderAdminPage 是纯函数：两次调用结果完全一致，且不接任何参数', () => {
@@ -212,4 +223,47 @@ test('消耗统计：拿不到就显示「数据不足」，绝不显示 0 或 �
   assert.equal(html.includes('|| 0'), false, '不得用 || 0 兜底（会把 null 变成 0）');
   assert.equal(/Infinity/.test(html), false, '不得出现 Infinity');
   assert.equal(html.includes('daily === null ? \'数据不足\''), true, '速率未知必须显示数据不足');
+});
+
+// ---------- 接入的 agent（docs/19 T03 / A11） ----------
+
+test('嵌入的 KNOWN_AGENTS 与 src/shared/agents.ts 逐字一致（防漂移的机械闸门）', () => {
+  // admin-page.ts 是纯字符串页、不能 import shared；这里把嵌入值钉回唯一事实源。
+  // 谁改了注册表忘了同步页面（或反之），这条就红。
+  const html = renderAdminPage();
+  assert.ok(
+    html.includes(JSON.stringify(KNOWN_AGENTS)),
+    '页面嵌入的 KNOWN_AGENTS 与 shared/agents.ts 不一致——请同步两处',
+  );
+  // 页内查表函数按 kind 精确匹配（不用 includes：'codex' 不该命中 'codex-cli'）
+  assert.ok(html.includes('KNOWN_AGENTS[i].kind === kind'));
+});
+
+test('agent 区块口径：未知 kind 降级展示（不拒绝）、active 不含 success', () => {
+  const html = renderAdminPage();
+  // 未知 kind → 👾 + 原样 kind（K9：仅展示元数据错配，无安全影响）
+  assert.ok(html.includes("meta ? meta.emoji + ' ' + meta.name : '👾 ' + a.kind"));
+  // success 是终态不算活动（与 host 投影器 activeCount 同口径）
+  assert.ok(html.includes("cur.state !== 'success'"), 'success 不计入活动数');
+  // 拿不到就明说，不给假数字
+  assert.ok(html.includes('当前没有 agent 在场'));
+  assert.equal(html.includes('innerHTML'), false, 'agent 行同样不许 innerHTML');
+});
+
+test('agent 区块打的是真实路由：GET /agents + /state（不写死端口）', () => {
+  const html = renderAdminPage();
+  assert.ok(html.includes("api('/agents', 'GET')"));
+  assert.ok(html.includes("api('/state', 'GET')"));
+  assert.equal(/127\.0\.0\.1:\d+|localhost:\d+|:3080/.test(html), false, '页面不得写死端口');
+});
+
+test('agent 区块不嵌任何用户数据（注册表是公开静态数据；凭证/站点一律运行时 fetch）', () => {
+  const html = renderAdminPage();
+  // 嵌入块里只有注册表四行（公开元数据），没有任何 agentId/任务文本/站点/凭证形状的运行时数据
+  assert.ok(html.includes('var KNOWN_AGENTS = [{'), '注册表应是构建期静态嵌入');
+  for (const secret of FAKE_SECRETS) {
+    assert.equal(html.includes(secret), false, `页面里出现了明文凭证 ${secret}`);
+  }
+  // agent 行数据全部来自运行时 fetch + textContent（td() 是既有的安全单元格工厂）
+  assert.ok(html.includes('function td(text, cls)'), 'agent 行应复用 td() 工厂（createElement + textContent）');
 });

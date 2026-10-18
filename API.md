@@ -13,7 +13,7 @@ dsh-pet 的宿主半侧向 DSH 自己的 Web 服务注册了**一条前缀路由
 
 | 接口 | 功能 |
 | --- | --- |
-| `GET /dsh-pet-7340/state` | **轮询唯一数据源**：一次拿到说话、工作状态、系统通知、余额四类状态；另带 `configVersion`（配置版本指纹，变了就该重拉 `/config`） |
+| `GET /dsh-pet-7340/state` | **轮询唯一数据源**：一次拿到说话、工作状态、系统通知、余额、在场 agent 五类状态；另带 `configVersion`（配置版本指纹，变了就该重拉 `/config`） |
 | `GET /dsh-pet-7340/config` | 读合并后的成品配置（内置默认 + 用户层，字段已填满） |
 | `GET /dsh-pet-7340/config/meta` | 配置文件路径、各类数据落盘位置、卸载该用哪个 profile |
 | `GET /dsh-pet-7340/models` | 可用服务商与模型清单（与 DSH 自己的模型选择器同源） |
@@ -86,27 +86,43 @@ dsh-pet 的宿主半侧向 DSH 自己的 Web 服务注册了**一条前缀路由
 
 ## 六、宿主无关网关（让任意 agent 接入）
 
-让**不跑 DSH 的 agent**（Claude Code / Codex / 自己的脚本）也能用上桌宠：自述能力、登记在场、
+让**不跑 DSH 的 agent**（Claude Code / Codex / WorkBuddy / 自己的脚本）也能用上桌宠：自述能力、登记在场、
 推送气泡与六档工作状态、订阅状态流。设计依据见
-[`docs/07-architecture-host-agnostic.md`](docs/07-architecture-host-agnostic.md)。
+[`docs/07-architecture-host-agnostic.md`](docs/07-architecture-host-agnostic.md) 与
+[`docs/19-agent-adapter-design.md`](docs/19-agent-adapter-design.md)。
 
 | 接口 | 档位 | 功能 |
 | --- | --- | --- |
 | `GET /capabilities` | L0 在场 | 能力自述：`mode`（standalone/dsh）、四个能力槽（llm/credentials/account/sessionEvents）、L0–L3 档位表、`relayKinds`、`instanceId` |
 | `POST /agents/hello` | L0 在场 | 登记/心跳（TTL 60s，重复调用即续期；`leaseId` 不变） |
 | `GET /agents` | L1 只读 | 在场 agent 列表（过期自动滤除） |
-| `POST /events` | L2 驱动 | 事件摄入：`notice`（气泡，severity + coalesceKey 去重）与 `status`（六档） |
+| `POST /events` | L2 驱动 | 事件摄入：`notice`（气泡，severity + coalesceKey 去重）与 `status`（六档，可带 `task` 任务详情 ≤40 码点） |
 | `GET /state/stream` | L1 只读 | SSE 推送版状态（50ms 去抖、上限 8 连接、`Last-Event-ID` 去重） |
+
+`GET /state` 另有一个 `sections.agents` 段（在场列表投影）：`{ agents: [{agentId, kind, state, task, lastSeenAt, expiresAt}], activeCount }`，
+与 `sections.workStatus` **同源分工**——workStatus 答「桌宠该播哪档动画」（单值），agents 答「谁在场、各自什么状态」（列表）。
+
+**三种 transport，协议只有一份**（都序列化成同一份 `POST /events`；选哪种看 agent 的形态）：
+
+| transport | 适合谁 | 用法 |
+| --- | --- | --- |
+| **HTTP（curl）** | 任何能发 HTTP 的脚本 / cron | `curl -X POST .../events -d '{"agentId":"me","status":"working","task":"pnpm test"}'` |
+| **CLI** `tools/dsh-pet-notify.mjs` | hook 脚本 / 无 MCP 的 agent | `node tools/dsh-pet-notify.mjs --kind workbuddy --status working --task "pnpm test"`（每次调用自带 hello 心跳；退出清理 `--status idle`） |
+| **MCP server** `tools/mcp-server.mjs` | WorkBuddy / Codex / Claude Code 等有 MCP client 的 agent | mcpServers 配置指向该文件（stdio）；暴露 `pet_status` / `pet_notice` / `pet_agents` 三个 tool；stdio 关闭时自动补发 idle（收敛 ~0s） |
+
+CLI 与 MCP 的**发现逻辑**：先读 `<DSH_HOME>/dsh-pet/gateways/*.json`（pid 活性校验），空/全失效时扫描
+`127.0.0.1:3080..3104` 兜底；也可用 `--base` 直接指定。找不到桌宠时 CLI **exit 1**（hook 脚本可感知，不静默）。
 
 **三条使用须知**：
 
 - **一个 curl 就能接入**：`curl -X POST .../events -d '{"agentId":"me","notice":{"severity":"info","text":"跑完了"}}'`
   —— 事件写进**既有叶子**（气泡 = `pets.<id>.say`、六档 = `sections.workStatus`），前端零改动。
 - **互斥规则**：`/capabilities` 的 `sessionEvents === "dsh"` 时（DSH 会话事件在场），`/events` 的
-  `status` 段会被忽略，只处理 `notice`——避免六档被两个源同时改写而抖动。
+  `status` 段（**含 `task`**）会被忽略，只处理 `notice`——避免六档被两个源同时改写而抖动。
 - **发现机制**：独立模式启动后会在 `<DSH_HOME>/dsh-pet/gateways/<pid>.json` 留一份发现记录
   （实例 id / 端口 / 能力），外部工具据此「看见」桌宠；进程被杀后记录自动判 stale。
   注意 **S0 之后端口不再顺延**：第二个实例会明确失败，不会偷偷起在 3081。
+- **未注册的 agent 类型**照样能接入：`kind` 是自由字符串，桌宠侧按降级元数据显示（👾 + 原样 kind），**不拒绝**。
 
 ## 三条要记住的约定
 

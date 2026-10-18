@@ -207,7 +207,8 @@ describe('/state + /balance —— 轮询统一状态与余额动作端点', () 
       sections: Record<string, { counter: number; data: unknown }>;
       pets: Record<string, unknown>;
     };
-    assert.deepEqual(Object.keys(body.sections).sort(), ['balance', 'notify', 'relays', 'workStatus']);
+    // agents = 在场 agent 投影叶（docs/19 T01 新增；新 section 必须同轮补进键集断言）
+    assert.deepEqual(Object.keys(body.sections).sort(), ['agents', 'balance', 'notify', 'relays', 'workStatus']);
     assert.equal(body.sections.balance.counter, 0, '没人写过时 counter=0（前端首拉当基线）');
     assert.equal(body.sections.balance.data, null);
     assert.deepEqual(body.pets, {});

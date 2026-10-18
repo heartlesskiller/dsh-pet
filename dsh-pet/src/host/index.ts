@@ -136,8 +136,10 @@ import type { RelaySite } from './relays/types';
 import type { RouteResult } from './route-result';
 import { capabilitiesFrom, hostModeOf } from './capabilities';
 import { AgentRegistry } from './gateway/agents';
+import { createBubbleGate } from './gateway/bubble-gate';
 import { createGateway, gatewayRouteOf } from './gateway/index';
 import { createNoticeCoalescer } from './gateway/ingest';
+import { createPresenceProjector } from './gateway/presence';
 import { createSseStream } from './gateway/stream';
 import { gatewayInstanceId } from './gateway/identity';
 import { GatewayAuth } from './gateway/auth';
@@ -987,6 +989,20 @@ export function apply(ctx: any): void {
   const agentRegistry = new AgentRegistry();
   const hostCtx = ctx as unknown as Record<string, unknown>;
   const hostCaps = capabilitiesFrom(hostCtx);
+  // 气泡仲裁门（docs/19 §4.3）：1500ms 窗口内低优先级不得覆盖高优先级，error 永不被吞。
+  // 只包装下面注入给 ingest 的 pushSay——ingest.ts 本体不改（T07 测试零影响）；
+  // 被压掉的不写 say 叶子（前端根本看不到，即「静默合并」）。
+  const bubbleGate = createBubbleGate();
+  // sections.agents 在场投影器（§4.2）：与 sections.workStatus **同源分工**——
+  // workStatus 答「桌宠该播哪档」（单值仲裁），agents 答「谁在场、各自什么状态」（列表投影）。
+  // 写入口径三条：registry.onChange（下）/ ingest 写 status/task 后 / start(5000) 兜底 timer
+  // （agent 崩了没人发 idle：TTL 60s + 5s 投影 = ≤65s 收敛，§4.7）。签名不变不写（K2）。
+  const presenceProjector = createPresenceProjector({
+    registry: agentRegistry,
+    // 合成会话口径一字不改：http:<agentId>（与 setWorkStatus 里同一个 sessionId）
+    workStateOf: (agentId) => workStatus.entryOf('http:' + agentId),
+    write: (data) => state.writeSection('agents', data),
+  });
   const gateway = createGateway({
     hostMode: hostModeOf(hostCtx),
     caps: hostCaps,
@@ -997,22 +1013,30 @@ export function apply(ctx: any): void {
     sseMaxConnections: SSE_MAX_CONNECTIONS,
     httpIngest: true,
     ingest: {
-      // 气泡：与 /broadcast 同一个叶子（单槽、后到覆盖先到）；severity/priority 供客户端择优渲染
-      pushSay: (petId, p) =>
-        state.writePet(petId, 'say', { text: p.text, severity: p.severity, priority: p.priority }),
-      // 六档工作状态：合成会话 id（http:<agentId>），与 DSH 会话事件共用 WorkStatusStore 的聚合法则
-      setWorkStatus: (agentId, next) => {
+      // 气泡：与 /broadcast 同一个叶子（单槽、后到覆盖先到）；severity/priority 供客户端择优渲染。
+      // 过气泡门控才写（§4.3）：低优先级在 1500ms 窗口内被高优先级压掉 → 静默合并。
+      pushSay: (petId, p) => {
+        if (!bubbleGate.pass(petId, p.priority)) return;
+        state.writePet(petId, 'say', { text: p.text, severity: p.severity, priority: p.priority });
+      },
+      // 六档工作状态：合成会话 id（http:<agentId>），与 DSH 会话事件共用 WorkStatusStore 的聚合法则。
+      // task（docs/19 T02）随同一会话条目走：与 status 同段同开关（DSH 在场互斥时一起忽略）。
+      setWorkStatus: (agentId, next, task) => {
         const sessionId = 'http:' + agentId;
         if (next === null) {
           cancelTerminalCleanup(sessionId);
-          workStatus.clear(sessionId);
+          workStatus.clear(sessionId); // 条目连同 task 一起清（不残留上一轮的文案）
           publishWorkStatus();
+          presenceProjector.refresh();
           return;
         }
-        if (!workStatus.setState(sessionId, next, 0)) return;
+        workStatus.setState(sessionId, next, 0);
+        // task 只在随包给了才写（null = 不动：保留该会话已有文案，与 DSH todo/write 同口径）
+        if (task !== null) workStatus.setTask(sessionId, task);
         publishWorkStatus();
         if (next === 'success' || next === 'error') scheduleTerminalCleanup(sessionId);
         else cancelTerminalCleanup(sessionId);
+        presenceProjector.refresh(); // 写入口径 2：档位/文案变了 → 投影列表跟着变
       },
       // 气泡目标：显式 petId（必须真实存在）→ 否则当前焦点宠物 → 没有则 ''
       resolvePetId: (requested) => {
@@ -1035,6 +1059,10 @@ export function apply(ctx: any): void {
     snapshot: () => state.read(),
     maxConnections: SSE_MAX_CONNECTIONS,
   });
+  /** 投影写入口径 1（docs/19 §4.2）：hello 登记/心跳、prune 剔除 → 立刻重投影 */
+  agentRegistry.onChange(() => presenceProjector.refresh());
+  /** 投影写入口径 3：5s 兜底 timer（unref；停机时随插件 effect 显式清掉） */
+  const stopPresenceTimer = presenceProjector.start();
   /** 网关子域薄分发（路由映射在 ./gateway/index，这里不写业务） */
   const handleGatewayRoute = (
     route: NonNullable<ReturnType<typeof gatewayRouteOf>>,
@@ -1912,6 +1940,7 @@ export function apply(ctx: any): void {
   ctx.effect(() => () => {
     disposed = true;
     sseStream.closeAll(); // SSE 长连接不主动关会让停机时进程挂着（closeAllConnections 只覆盖 node 侧 socket）
+    stopPresenceTimer(); // agents 投影兜底 timer（已 unref，显式清更干净）
     stopHelper('dsh-host-stop');
   });
 

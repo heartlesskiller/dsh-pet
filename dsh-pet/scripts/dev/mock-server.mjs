@@ -369,6 +369,73 @@ async function handleRelays(req, res, method, pathname) {
   });
 }
 
+// ---------- 在场 agent 内存存储（docs/19 T04/T05 冒烟与验收口径） ----------
+// 与宿主同构的两份内存态：
+//   agentStore = 在场登记表（hello 驱动，TTL 60s 读时 prune）→ GET /agents 与 /state 的 agents 列表；
+//   statusStore = 六档会话（/events 驱动，键 http:<agentId> 的 mock 简化：直接用 agentId）
+//     → /state agents 叶里每条的 state/task。没 hello 过的 agent 发 /events 只进 statusStore
+//     （与真宿主一致：档位会话不依赖在场登记，投影器只给在场条目贴档位）。
+const AGENT_TTL_MS = 60_000;
+/** status 六态 → 工作状态档位（与 host gateway/ingest.ts 的 statusToWorkState 同口径） */
+const statusToWorkState = (status) =>
+  ({ idle: null, thinking: 'thinking', working: 'working', 'waiting-approval': 'waiting', done: 'success', error: 'error' })[status];
+
+const agentStore = {
+  entries: new Map(),
+  hello(agentId, kind) {
+    const now = Date.now();
+    const prev = this.entries.get(agentId);
+    this.entries.set(agentId, {
+      agentId,
+      kind: kind || (prev && prev.kind) || 'unknown',
+      lastSeenAt: now,
+      expiresAt: now + AGENT_TTL_MS,
+    });
+  },
+  prune() {
+    const now = Date.now();
+    for (const [id, e] of this.entries) if (e.expiresAt <= now) this.entries.delete(id);
+  },
+  list() {
+    this.prune();
+    return [...this.entries.values()].sort((a, b) => a.agentId.localeCompare(b.agentId));
+  },
+};
+const statusStore = new Map(); // agentId → { state, task }
+
+// 种子：一个已知 kind（working + task，摘要冠军）+ 一个未知 kind（降级显示 👾 用）
+agentStore.entries.set('workbuddy@MOCK-PC', {
+  agentId: 'workbuddy@MOCK-PC',
+  kind: 'workbuddy',
+  lastSeenAt: Date.now() - 5_000,
+  expiresAt: Date.now() + AGENT_TTL_MS,
+});
+statusStore.set('workbuddy@MOCK-PC', { state: 'working', task: 'pnpm test' });
+agentStore.entries.set('my-script@MOCK-PC', {
+  agentId: 'my-script@MOCK-PC',
+  kind: 'my-script',
+  lastSeenAt: Date.now() - 2_000,
+  expiresAt: Date.now() + AGENT_TTL_MS,
+});
+statusStore.set('my-script@MOCK-PC', { state: 'thinking', task: null });
+
+/** /state 的 sections.agents 叶数据（host 投影器同口径：state/task 取自合成会话，无会话 → null） */
+const agentsSectionData = () => {
+  const agents = agentStore.list().map((e) => {
+    const st = statusStore.get(e.agentId);
+    return {
+      agentId: e.agentId,
+      kind: e.kind,
+      state: st ? st.state : null,
+      task: st ? st.task : null,
+      lastSeenAt: e.lastSeenAt,
+      expiresAt: e.expiresAt,
+    };
+  });
+  const activeCount = agents.filter((a) => a.state !== null && a.state !== 'success').length;
+  return { agents, activeCount };
+};
+
 /** 构造的中转站舰队叶（T04 验收口径：3 站 1 无限 1 低额 1 失败 + 1 外币） */
 const RELAYS_FLEET = {
   focusSiteId: null,
@@ -418,9 +485,74 @@ const RELAYS_FLEET = {
   refreshedAt: '2026-10-17T00:00:00.000Z',
 };
 
+/**
+ * 在场 agent 子域路由（docs/19；契约同 openapi.yaml 第六节）。
+ * GET /agents（L1）/ POST /agents/hello（L0 心跳）/ POST /events（L2 驱动）。
+ */
+async function handleAgents(req, res, method, pathname) {
+  const bad = (status, message) => sendJson(res, status, { ok: false, error: message });
+
+  if (pathname === '/dsh-pet-7340/agents') {
+    if (method !== 'GET') return bad(405, 'method not allowed');
+    const agents = agentStore.list().map((e) => ({
+      agentId: e.agentId,
+      kind: e.kind,
+      lastSeenAt: e.lastSeenAt,
+      expiresAt: e.expiresAt,
+    }));
+    return sendJson(res, 200, { ok: true, agents });
+  }
+
+  if (pathname === '/dsh-pet-7340/agents/hello') {
+    if (method !== 'POST') return bad(405, 'method not allowed');
+    let body = {};
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      return bad(400, 'invalid JSON body');
+    }
+    const o = body && typeof body === 'object' ? body : {};
+    const agentId = typeof o.agentId === 'string' ? o.agentId.trim() : '';
+    if (!agentId) return bad(400, '缺少 agentId');
+    agentStore.hello(agentId, typeof o.kind === 'string' ? o.kind : '');
+    return sendJson(res, 200, { ok: true, leaseId: 'mock-lease-' + agentId, ttlSec: 60, granted: [] });
+  }
+
+  if (pathname === '/dsh-pet-7340/events') {
+    if (method !== 'POST') return bad(405, 'method not allowed');
+    let body = {};
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      return bad(400, 'invalid JSON body');
+    }
+    const o = body && typeof body === 'object' ? body : {};
+    const agentId = typeof o.agentId === 'string' ? o.agentId.trim() : '';
+    if (!agentId) return bad(400, '缺少 agentId');
+    const hasNotice = o.notice !== undefined && o.notice !== null;
+    const hasStatus = o.status !== undefined && o.status !== null;
+    if (!hasNotice && !hasStatus) return bad(400, 'notice 或 status 至少给一个');
+    if (hasStatus && statusToWorkState(o.status) === undefined) return bad(400, '未知 status');
+    if (hasNotice) {
+      const n = o.notice && typeof o.notice === 'object' ? o.notice : {};
+      if (!['info', 'warning', 'error'].includes(n.severity)) return bad(400, 'notice.severity 必须是 info / warning / error');
+      if (typeof n.text !== 'string' || !n.text.trim()) return bad(400, 'notice.text 不能为空');
+    }
+    if (hasStatus) {
+      const state = statusToWorkState(o.status);
+      if (state === null) statusStore.delete(agentId); // idle = 清会话
+      else statusStore.set(agentId, { state, task: typeof o.task === 'string' && o.task.trim() ? o.task.trim() : null });
+    }
+    return sendJson(res, 200, { ok: true });
+  }
+
+  return bad(404, 'unknown agents route: ' + pathname);
+}
+
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const pathname = decodeURIComponent(url.pathname);
+  const method = req.method ?? 'GET';
 
   // 统一轮询状态（GET /state）：客户端 overlay 唯一的数据来源。
   // counter 每次请求全局递增（与 host 的 PollStateStore.next() 同口径：单调、同毫秒不重复）
@@ -428,6 +560,8 @@ const server = createServer((req, res) => {
   // sections.relays 是构造的「3 站 1 无限 1 低额 1 失败 + 1 外币」舰队叶（T04 验收口径），
   // 与 sections.balance 并存——客户端据此把余额展示切换成舰队口径。
   // focusSiteId 与 /relays/focus 写入同一份内存态（T06 验收据此验证焦点读取链路）。
+  // sections.agents 是在场 agent 投影叶（docs/19：与 workStatus 同源分工——列表回答
+  // 「谁在场、各自什么状态」；mock 口径 = 种子 2 条 + hello/events 内存态，见 agentStore）。
   if (pathname === '/dsh-pet-7340/state') {
     stateCounter += 1;
     sendJson(res, 200, {
@@ -442,6 +576,7 @@ const server = createServer((req, res) => {
           },
         },
         relays: { counter: stateCounter, data: { ...RELAYS_FLEET, focusSiteId: relayStore.focus } },
+        agents: { counter: stateCounter, data: agentsSectionData() },
       },
       pets: {},
     });
@@ -452,6 +587,13 @@ const server = createServer((req, res) => {
   // 内存存储（见 relayStore）；必须在 thumb/ 静态资源之前拦下来。
   if (pathname.startsWith('/dsh-pet-7340/relays')) {
     void handleRelays(req, res, req.method ?? 'GET', pathname);
+    return;
+  }
+
+  // 在场 agent（docs/19）：GET /agents（L1）/ POST /agents/hello（L0 心跳）/ POST /events（L2 驱动）。
+  // 契约同 openapi.yaml 第六节；内存态见上方 agentStore / statusStore。
+  if (pathname.startsWith('/dsh-pet-7340/agents') || pathname === '/dsh-pet-7340/events') {
+    void handleAgents(req, res, method, pathname);
     return;
   }
 

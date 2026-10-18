@@ -171,6 +171,20 @@ export function renderAdminPage(): string {
   </table>
 </section>
 
+<section id="agents-section">
+  <h2>接入的 agent</h2>
+  <div class="row">
+    <button id="agents-refresh" type="button">刷新</button>
+    <span id="agents-summary" class="muted"></span>
+  </div>
+  <div id="agents-hint" class="muted">任意 agent 都能驱动桌宠（WorkBuddy / Codex / Claude Code / 自己的脚本）：MCP server、CLI 或一个 curl 均可——协议只有一份 POST /events。未登记的类型也会显示（降级展示），不拒绝接入。</div>
+  <div id="agents-error" class="err" hidden></div>
+  <table id="agents-table" hidden>
+    <thead><tr><th>Agent</th><th>类型</th><th>状态</th><th>任务</th><th>最近心跳</th></tr></thead>
+    <tbody id="agents-rows"></tbody>
+  </table>
+</section>
+
 <script>
 (function () {
   'use strict';
@@ -609,7 +623,66 @@ export function renderAdminPage(): string {
       });
   });
 
+  // ---- 接入的 agent（docs/19 T03）：GET /agents（在场权威列表）+ /state 的 sections.agents
+  // （各自动态档位/任务；host 投影器写，形状对应 shared/agents-face.ts 的 readAgents）----
+  // KNOWN_AGENTS 是**构建期嵌入的静态注册表**：公开数据（显示名/emoji/近似色值/接入提示），
+  // **不是用户数据**——与「零数据嵌入」纪律不冲突（那条针对站点/凭证等用户资产）。
+  // 嵌入值与 src/shared/agents.ts 逐字一致，由 admin-page.test.ts 的 JSON 比对钉死；
+  // 改注册表必须同轮同步这里，否则测试红。
+  var KNOWN_AGENTS = [{"kind":"workbuddy","name":"WorkBuddy","emoji":"🧰","color":"#6366f1","tag":"WB","transports":["mcp","cli","http"],"mcp":true,"hookHint":"docs 接入指南 §MCP"},{"kind":"codex","name":"Codex","emoji":"🤖","color":"#10a37f","tag":"CX","transports":["mcp","cli","http"],"mcp":true,"hookHint":"docs 接入指南 §CLI"},{"kind":"claude-code","name":"Claude Code","emoji":"🐈","color":"#d97757","tag":"CC","transports":["cli","http"],"mcp":true,"hookHint":"hooks: Stop"},{"kind":"custom","name":"自定义脚本","emoji":"📜","color":"#6b7280","tag":"DIY","transports":["http","cli"],"mcp":false}];
+  var AGENT_STATE_TEXT = { thinking: '思考', working: '工作', result: '整理', waiting: '等待', success: '完成', error: '出错' };
+  function agentMetaOf(kind) {
+    for (var i = 0; i < KNOWN_AGENTS.length; i++) {
+      if (KNOWN_AGENTS[i].kind === kind) return KNOWN_AGENTS[i];
+    }
+    return null; // 未知 kind：降级展示（👾 + 原样 kind），绝不拒绝（K9：kind 不参与权限判定）
+  }
+  function renderAgents(list, state) {
+    var rowsBox = $('agents-rows');
+    rowsBox.textContent = '';
+    setError($('agents-error'), '');
+    var agents = (list && list.agents) || [];
+    // 档位/任务来自 /state 的 sections.agents 叶（GET /agents 只带在场事实，不带动态）
+    var leaf = state && state.sections ? state.sections.agents : null;
+    var data = leaf && leaf.data ? leaf.data : null;
+    var live = {};
+    if (data && Array.isArray(data.agents)) {
+      data.agents.forEach(function (a) { if (a && a.agentId) live[a.agentId] = a; });
+    }
+    $('agents-table').hidden = agents.length === 0;
+    var active = 0;
+    agents.forEach(function (a) {
+      var meta = agentMetaOf(a.kind);
+      var cur = live[a.agentId] || {};
+      var tr = document.createElement('tr');
+      tr.appendChild(td(a.agentId, 'mono'));
+      tr.appendChild(td(meta ? meta.emoji + ' ' + meta.name : '👾 ' + a.kind));
+      tr.appendChild(td(cur.state ? (AGENT_STATE_TEXT[cur.state] || cur.state) : '空闲'));
+      tr.appendChild(td(cur.task || '—'));
+      tr.appendChild(td(a.lastSeenAt ? new Date(a.lastSeenAt).toLocaleTimeString() : '—'));
+      rowsBox.appendChild(tr);
+      if (cur.state && cur.state !== 'success') active += 1;
+    });
+    $('agents-summary').textContent = agents.length > 0
+      ? '在场 ' + agents.length + ' 个 · 活动 ' + active + ' 个'
+      : '当前没有 agent 在场（任意 agent 经 MCP / CLI / curl 都能接入）';
+  }
+  function loadAgents() {
+    return Promise.all([
+      api('/agents', 'GET').catch(function () { return null; }),
+      api('/state', 'GET').catch(function () { return null; })
+    ]).then(function (out) {
+      renderAgents(out[0], out[1] || {});
+    }).catch(function (e) {
+      setError($('agents-error'), '加载失败：' + (e && e.message ? e.message : String(e)));
+    });
+  }
+  $('agents-refresh').addEventListener('click', function () {
+    loadAgents().catch(function () {});
+  });
+
   load();
+  loadAgents();
 })();
 </script>
 </body>

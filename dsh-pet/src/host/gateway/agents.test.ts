@@ -71,3 +71,54 @@ test('kind 缺省：首次 unknown，之后心跳可以补上（不覆盖成空�
   reg.hello({ agentId: 'a' }); // 不带 kind 的心跳不该把已知 kind 抹掉
   assert.equal(reg.list().agents[0].kind, 'claude-code');
 });
+
+test('onChange：hello 登记/续期与 prune 剔除都通知；取消订阅后不再收', () => {
+  let now = 1_000;
+  const reg = new AgentRegistry({ ttlMs: 60_000, now: () => now });
+  let hits = 0;
+  const off = reg.onChange(() => {
+    hits += 1;
+  });
+
+  reg.hello({ agentId: 'a', kind: 'cli' });
+  assert.equal(hits, 1, '登记必须通知（投影器据此重投影）');
+
+  now = 30_000;
+  reg.hello({ agentId: 'a' }); // 心跳续期也算变化（lastSeenAt/expiresAt 推进）
+  assert.equal(hits, 2, '心跳续期必须通知');
+
+  now = 1_000 + 60_001; // 距首次登记过了 60s，但心跳把租约推到了 90s——仍在场
+  reg.list();
+  assert.equal(hits, 2, '未过期不通知（心跳续期把 TTL 推后了）');
+
+  now = 90_001;
+  reg.list(); // 读时 prune → 剔除 → 通知
+  assert.equal(hits, 3, '过期剔除必须通知');
+
+  off();
+  reg.hello({ agentId: 'b' });
+  assert.equal(hits, 3, '取消订阅后不再收通知');
+});
+
+test('onChange：无变化的 prune 不通知（不打扰投影器空转）', () => {
+  const now = 1_000;
+  const reg = new AgentRegistry({ ttlMs: 60_000, now: () => now });
+  reg.hello({ agentId: 'a' });
+  let hits = 0;
+  reg.onChange(() => {
+    hits += 1;
+  });
+  reg.list(); // 没有过期条目 → 无剔除 → 不通知
+  reg.size();
+  assert.equal(hits, 0, '无变化不通知');
+});
+
+test('onChange：订阅方抛错不影响登记（投影故障不许拖垮在场表）', () => {
+  const reg = new AgentRegistry();
+  reg.onChange(() => {
+    throw new Error('投影器炸了');
+  });
+  const r = reg.hello({ agentId: 'a', kind: 'cli' });
+  assert.ok(r.ok, '订阅方异常被吞掉，登记照常成功');
+  assert.equal(reg.size(), 1);
+});

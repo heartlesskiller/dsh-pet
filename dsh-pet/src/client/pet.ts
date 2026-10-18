@@ -29,6 +29,9 @@ import {
 } from '../shared/state';
 import { WORK_STATUS_INDEX, type WorkStatusSnapshot } from '../shared/work-status';
 import { readRelays, relaysAlertKey, relaysBalanceState, type RelaysView } from '../shared/relays';
+// 在场 agent 投影（sections.agents；docs/19 T03）：tooltip 摘要的唯一数据源。
+// 通配捕获（takeChanged）自动覆盖新 section，这里只加一个 else-if 分支（T04 已证模式）。
+import { agentsSummary, readAgents, type AgentsFaceView } from '../shared/agents-face';
 import { makeBalanceBubble, makeWhisperBubble } from './bubble';
 import { makeRelayBubble } from './relay-face';
 import { clickScore, SCORE_MIN_SPEED, mountScorePopup, spawnScoreBurst } from '../shared/score-popup';
@@ -153,6 +156,7 @@ export function makePetUI(rt: {
     balanceNoticeTick,
     relays,
     relayAlertOn,
+    agents,
     workStatus,
     workStatusTick,
     say,
@@ -169,6 +173,9 @@ export function makePetUI(rt: {
     relays?: RelaysView | null;
     /** 新低余额告警的 10s 临时显示（OP-14：恢复前不重复弹，由容器按告警键去重） */
     relayAlertOn?: boolean;
+    /** 在场 agent 视图（sections.agents；无投影/空列表时容器传 null）——只喂 tooltip 摘要，
+     *  **不新开气泡通道**（§4.5：气泡是易失通道，在场列表是状态数据，媒介属性不同） */
+    agents?: AgentsFaceView | null;
     workStatus: WorkStatusSnapshot | null;
     workStatusTick: number;
     /** 本宠物的「说一句话」（碎碎念/命令气泡/对话回复三合一；容器从 S 分发下来） */
@@ -1568,6 +1575,9 @@ export function makePetUI(rt: {
       // 原先这里挂 title（原生系统提示）：已换成自绘浮层，但无障碍名称不能跟着丢
       'aria-label': cfg.name,
     };
+    // 悬浮提示文本：有 agent 在干活时显示摘要（「🧰 WorkBuddy · pnpm test」，取 active 中
+    // 优先级最高者；无 active / 无投影 → 回落宠物显示名，tooltip 不许空）——docs/19 §4.5
+    const tipText = agents ? (agentsSummary(agents) ?? cfg.name) : cfg.name;
     return h('div', {
       ref: rootRef,
       className: 'dsh-pet-root',
@@ -1595,13 +1605,13 @@ export function makePetUI(rt: {
         }),
         // 悬浮提示（替代原生 title）：元素常驻、只切 class——挂卸节点吃不到 .12s 淡入过渡；
         // 坐标由 placeTip 按光标直接写 style（这里刻意不传 style，免得 React 覆盖）。
-        // 文本 = 宠物显示名（host 已保证非空）；pointer-events:none 见 TOOLTIP_CSS，
-        // 否则它会挡住命中区，mouseenter/leave 互相打架导致闪烁。
+        // 文本 = agent 在场摘要（有 agent 在干活时）或宠物显示名（host 已保证非空）；
+        // pointer-events:none 见 TOOLTIP_CSS，否则它会挡住命中区，mouseenter/leave 互相打架导致闪烁。
         h('div', {
           ref: tipRef,
           className: TOOLTIP_CLASS + (tipOn ? ' is-on' : ''),
           'aria-hidden': 'true',
-          children: cfg.name,
+          children: tipText,
         }),
       ],
     });
@@ -1628,6 +1638,9 @@ export function makePetUI(rt: {
     // 中转站舰队（sections.relays）：与 sections.balance **并存**——host 有启用站点时每拍都写，
     // 客户端据此把「余额展示」切换成舰队/焦点站口径；无可计站时不动余额槽（回落到单服务商）。
     const [relays, setRelays] = useState<RelaysView | null>(null);
+    // 在场 agent（sections.agents；docs/19 T03）：只驱动桌宠 tooltip 摘要（见 PetCard 的 tipText）。
+    // 与 relays 同款「无数据不碰」：读不出（readAgents → null）就保持上一份，不清空。
+    const [agents, setAgents] = useState<AgentsFaceView | null>(null);
     // 新低余额告警的临时显示：key 变化才算新告警（OP-14：余额继续跌不重复弹，恢复后 key 变化才再弹）
     const [relayAlertOn, setRelayAlertOn] = useState(false);
     const relayAlertKeyRef = useRef('');
@@ -1765,6 +1778,11 @@ export function makePetUI(rt: {
                   relayAlertKeyRef.current = '';
                 }
               }
+            } else if (path === 'sections.agents') {
+              // 在场 agent 投影（docs/19 T03）：readAgents 坏形状 → null（跳过这一拍）；
+              // 空列表是合法数据（「查不到就是空数组」）→ 照常 set（摘要据此回落宠物名）
+              const view = readAgents(leaf.data);
+              if (view) setAgents(view);
             } else if (path === 'sections.workStatus') {
               const snap = readWorkStatus(leaf);
               if (snap) {
@@ -1819,6 +1837,7 @@ export function makePetUI(rt: {
             balanceNoticeTick,
             relays,
             relayAlertOn,
+            agents,
             workStatus,
             workStatusTick,
             say: sayRef.current[p.id],

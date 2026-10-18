@@ -86,6 +86,7 @@
     "test": "node --experimental-strip-types --import ./scripts/test-register.mjs --test src/**/*.test.ts",
     "verify:relays": "node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/verify-relays-client.ts",
     "verify:relays-admin": "node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/verify-relays-admin.ts",
+    "verify:agents": "node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/verify-agents-client.ts",
     "verify:shortcut": "node tools/verify-shortcut-utf8.mjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "types": "node scripts/gen-types.mjs",

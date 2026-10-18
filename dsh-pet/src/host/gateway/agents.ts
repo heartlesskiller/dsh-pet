@@ -74,11 +74,39 @@ export class AgentRegistry {
   declare private readonly entries: Map<string, AgentEntry>;
   declare private readonly ttlMs: number;
   declare private readonly now: () => number;
+  /**
+   * 变化订阅者（docs/19 §4.2：sections.agents 投影器的写入口径之一）。
+   * **纯新增**：hello/prune 时多一次「遍历空集合」，不改变任何登记语义。
+   */
+  declare private readonly listeners: Set<() => void>;
 
   constructor(options: AgentRegistryOptions = {}) {
     this.entries = new Map();
     this.ttlMs = options.ttlMs ?? 60_000;
     this.now = options.now ?? Date.now;
+    this.listeners = new Set();
+  }
+
+  /**
+   * 订阅在场表变化（hello 登记/续期、prune 剔除）。返回取消订阅函数。
+   * 订阅方抛错**不影响登记**（逐个 try/catch）：在场登记的可用性优先于投影。
+   */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /** 通知订阅方（内部方法；登记/剔除路径统一调用） */
+  private notifyChange(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch {
+        // 投影方的问题不许拖垮在场登记
+      }
+    }
   }
 
   /**
@@ -104,6 +132,7 @@ export class AgentRegistry {
       expiresAt: now + this.ttlMs,
     };
     this.entries.set(agentId, entry);
+    this.notifyChange(); // 登记/续期 → 投影器重投影（docs/19 §4.2 写入口径 1）
     return { ok: true, leaseId: entry.leaseId, ttlSec: Math.round(this.ttlMs / 1000), granted: entry.wants };
   }
 
@@ -123,12 +152,18 @@ export class AgentRegistry {
     return this.entries.size;
   }
 
-  /** 清掉全部已过期条目（读路径与写路径都走它，不另起定时器） */
+  /** 清掉全部已过期条目（读路径与写路径都走它，不另起定时器）。
+   *  有剔除才通知订阅方——无变化不打扰投影器（「变化才写」纪律的下游）。 */
   private prune(): void {
     const now = this.now();
+    let dropped = false;
     for (const [id, entry] of this.entries) {
-      if (entry.expiresAt <= now) this.entries.delete(id);
+      if (entry.expiresAt <= now) {
+        this.entries.delete(id);
+        dropped = true;
+      }
     }
+    if (dropped) this.notifyChange();
   }
 }
 

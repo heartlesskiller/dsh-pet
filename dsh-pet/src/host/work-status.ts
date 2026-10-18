@@ -208,6 +208,17 @@ export class WorkStatusStore {
     return this.sessions.get(sessionId)?.state;
   }
 
+  /**
+   * 该会话当前条目快照（state + task；无条目 / 已清 → undefined）。
+   *
+   * 给 sections.agents 投影器用（docs/19 §4.2）：在场列表要回答「这个 agent 现在什么档位、
+   * 在干什么」，而 pickDisplayed 只给全局单值——答不了列表问题。返回副本，调用方改不动内部态。
+   */
+  entryOf(sessionId: string): { state: HostWorkStatusState; task: string | null } | undefined {
+    const entry = this.sessions.get(sessionId);
+    return entry ? { state: entry.state, task: entry.task } : undefined;
+  }
+
   /** 写会话状态（保留该会话已有的 task）；同状态且 seq 不更新 → 无变化返回 false（防刷屏） */
   setState(sessionId: string, state: HostWorkStatusState, seq = 0): boolean {
     const prev = this.sessions.get(sessionId);
