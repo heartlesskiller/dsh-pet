@@ -7,7 +7,7 @@
  *
  * 做法：
  *   1. 读 `tools/fixtures/shortcut-zh.spec.json`（UTF-8，含中文），把 out 改到临时目录
- *   2. 用 electron 跑 `make-shortcut.mjs --json <临时 spec>`
+ *   2. 用 electron 跑 `make-shortcut.mjs <临时 spec>`（首参是 .json 即 JSON 模式）
  *   3. 抓 stdout 里的 `RESULT {...}`，取 `read.description`
  *   4. 把 description 拆成码点与期望值逐字比对
  *
@@ -99,10 +99,11 @@ async function main() {
   const specPath = join(dir, 'spec.json');
   try {
     const spec = JSON.parse(readFileSync(FIXTURE, 'utf8'));
-    spec.out = outLnk;
+    spec.lnk = outLnk;
     writeFileSync(specPath, JSON.stringify(spec, null, 2), 'utf8');
 
-    const run = await runElectron(exe, resolve(HERE, 'make-shortcut.mjs'), ['--json', specPath]);
+    // 首参以 .json 结尾 → make-shortcut 自动走 JSON 模式（不需要 flag）
+    const run = await runElectron(exe, resolve(HERE, 'make-shortcut.mjs'), [specPath]);
     const result = parseResult(run.stdout);
     if (result === null) {
       yell('[verify-shortcut] 没拿到 RESULT，stdout/stderr：');

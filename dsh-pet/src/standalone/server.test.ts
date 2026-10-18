@@ -203,26 +203,27 @@ describe('listenStandaloneServer —— 端口与关闭', () => {
     for (const close of closers.splice(0)) await close().catch(() => {});
   });
 
-  test('首选端口被占用 → 明确抛错，绝不顺延到别的端口', async () => {
+  test('首选端口被占用 → 明确抛错并指名被占的那个端口（绝不顺延）', async () => {
     const blocker = await occupyPort();
     closers.push(blocker.close);
-    // 顺延是「第二次启动静默起出第二只桌宠」的成因（见 ./instance-lock），必须炸出来
+    // 顺延是「第二次启动静默起出第二只桌宠」的成因（见 ./instance-lock），必须炸出来。
+    //
+    // 「没顺延」怎么证：**报错必须指名被占的那个端口本身**。
+    // 旧写法是去探「相邻端口还能不能 bind」——那依赖 OS 恰好给出空邻端口，
+    // 并行跑测试时邻端口常被别人占着，于是**假红**（本文件因此在全量套件里偶发失败）。
+    // 指名端口既确定性强，又比探针更直接地证明"没换端口重试"。
     await assert.rejects(
       () => listenStandaloneServer({ routes: [pluginLikeRoute()], logger: silent, port: blocker.port }),
       (error: unknown) => {
-        assert.match((error as Error).message, /端口 .* 已被占用/);
-        assert.match((error as Error).message, /只跑一个实例/);
+        const message = (error as Error).message;
+        assert.match(message, /只跑一个实例/);
+        assert.ok(
+          message.includes(`端口 ${blocker.port} 已被占用`),
+          `报错必须指名被占的端口 ${blocker.port}（顺延后失败的话这里会是别的端口）：${message}`,
+        );
         return true;
       },
     );
-    // 且没有在别的端口上偷偷起服务：相邻端口必须仍可被占用
-    // （占得上 = 没有监听者；顺延会留下偷听的 socket，这里必须还能 bind 成功）
-    for (const port of [blocker.port + 1, blocker.port + 2]) {
-      // 探针 server 成功占用后立即登记收尾：任何路径都不泄漏句柄
-      // （泄漏会让 node 进程永不退出，全量测试被拖到超时）
-      const probe = await occupyPort(port);
-      closers.push(probe.close);
-    }
   });
 
   test('关闭后端口真正释放（keep-alive 连接没被断掉的话这里会 EADDRINUSE）', async () => {

@@ -6,8 +6,8 @@
  */
 
 export interface ShortcutSpec {
-  /** 要生成的 .lnk 路径 */
-  out: string;
+  /** 要生成的 .lnk 路径（规范键名；也接受别名 out） */
+  lnk: string;
   /** 快捷方式指向的目标 */
   target: string;
   /** 命令行参数（可为空串） */
@@ -28,6 +28,7 @@ export type SpecResult = { ok: true; value: ShortcutSpec } | { ok: false; messag
 
 export const USAGE: string;
 
+export function isJsonSpecPath(value: unknown): boolean;
 export function pickSpecSource(argv: string[]): SpecSource;
 export function normalizeSpec(raw: unknown): SpecResult;
 export function specFromArgv(argv: string[]): SpecResult;

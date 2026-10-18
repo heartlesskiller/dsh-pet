@@ -1,5 +1,5 @@
 {
-  "out": "OVERRIDDEN_BY_VERIFIER",
+  "lnk": "OVERRIDDEN_BY_VERIFIER",
   "target": "C:/Windows/System32/notepad.exe",
   "args": "",
   "cwd": "C:/Windows",

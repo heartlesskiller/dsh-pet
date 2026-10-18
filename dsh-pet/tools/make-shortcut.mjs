@@ -7,9 +7,9 @@
  * 代码页转换，写进 .lnk 变成「鍚姩 DSH 妗屽疇」（UTF-8 字节被当 GBK 读）。
  * 现在中文只从 **UTF-8 的 JSON 文件** 进，完全不碰 argv。
  *
- * 用法：
- *   electron.exe tools/make-shortcut.mjs --json <spec.json>     ← 推荐（中文必须走这个）
- *   electron.exe tools/make-shortcut.mjs <out> <target> <args> <cwd> <icon> <desc>   ← 兼容旧脚本
+ * 用法（**走哪条路由看参数形状，不需要 flag**）：
+ *   electron.exe tools/make-shortcut.mjs <spec.json>     ← 首参以 .json 结尾 → JSON 模式（中文必须走这个）
+ *   electron.exe tools/make-shortcut.mjs <lnk> <target> <args> <cwd> <icon> <desc>   ← 兼容旧脚本
  *   electron.exe tools/make-shortcut.mjs --help
  *
  * 为什么不用 PowerShell 的 WScript.Shell：受限环境里 COM 实例化被安全策略硬禁；
@@ -62,7 +62,7 @@ if (source.kind === 'help') {
   } else {
     const spec = parsed.value;
     app.whenReady().then(() => {
-      const ok = shell.writeShortcutLink(spec.out, 'create', {
+      const ok = shell.writeShortcutLink(spec.lnk, 'create', {
         target: spec.target,
         args: spec.args,
         cwd: spec.cwd,
@@ -73,12 +73,12 @@ if (source.kind === 'help') {
 
       let read;
       try {
-        read = shell.readShortcutLink(spec.out);
+        read = shell.readShortcutLink(spec.lnk);
       } catch (e) {
         read = { error: e instanceof Error ? e.message : String(e) };
       }
 
-      emit({ ok, source: source.kind, out: spec.out, wrote: spec, read });
+      emit({ ok, source: source.kind, lnk: spec.lnk, wrote: spec, read });
       app.exit(ok ? 0 : 1);
     });
   }

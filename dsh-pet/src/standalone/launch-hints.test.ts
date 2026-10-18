@@ -168,10 +168,26 @@ test('foreignOccupantHint：launcher 与 admin 两处文案不同，各自指向
   const launcher = foreignOccupantHint('launcher', 3080);
   assert.ok(launcher.includes('DSH'));
   assert.ok(launcher.includes('不需要双击这个快捷方式'));
+  // 两处文案**有意不同**：launcher 这条不该把用户往设置页引（他点的是「桌宠」）
+  assert.equal(launcher.includes('设置页'), false, 'launcher 文案不该指向设置页');
 
   const admin = foreignOccupantHint('admin', 3080);
   assert.ok(admin.includes('3080'));
   assert.ok(admin.includes('DSH 设置页'));
   assert.ok(admin.includes('中转站管理'));
   assert.ok(admin.includes('桌宠配置'), '要指明设置页里的位置');
+});
+
+test('🔴 admin 提示必须**三行完整**，且第二行（落点）带「DSH 设置页 + 中转站管理」', () => {
+  // 只显示第一行 = 用户知道"有问题"但不知道"去哪"，等于没修好。
+  // 这条钉的是内容完整性：三行都在，落点那行两个关键名词都在。
+  const lines = foreignOccupantHint('admin', 3080).split('\n');
+  assert.equal(lines.length, 3, `必须正好三行，实际 ${lines.length} 行：${JSON.stringify(lines)}`);
+
+  assert.ok(lines[0].includes('不是独立模式的桌宠'), '第一行：说清是什么问题');
+  assert.ok(lines[1].includes('DSH 设置页'), '第二行（落点）必须含「DSH 设置页」');
+  assert.ok(lines[1].includes('中转站管理'), '第二行（落点）必须含「中转站管理」');
+  assert.ok(lines[2].includes('不需要双击'), '第三行：告诉用户这个快捷方式不用点');
+  // 没有被截断：三行各自非空
+  for (const [i, line] of lines.entries()) assert.ok(line.trim().length > 0, `第 ${i + 1} 行为空`);
 });
