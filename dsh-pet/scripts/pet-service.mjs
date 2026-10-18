@@ -60,6 +60,48 @@ export async function petHealth(port) {
   }
 }
 
+// ---------- 端口占用者三态（S0 之后的真 bug 修在这里） ----------
+
+/**
+ * 端口占用者：
+ * - `none`           端口空着（连接拒绝/超时）→ 可以去起服务
+ * - `our-standalone` 独立模式桌宠已经在跑 → 直接用，不 spawn
+ * - `foreign`        **能连上但不是我们的**（DSH 宿主 / 别的程序 / 404 / HTML）
+ *                    → **绝不许 spawn**：DSH 也占着 3080，spawn 会撞端口然后干等 30 秒，
+ *                    用户看到的就是"双击了，什么都没发生"。
+ *
+ * 这是本 bug 的根因：旧代码只有"能连上且 name 匹配"这一个布尔，
+ * 于是 DSH 占着 3080 时被判成"没在跑"，一路走到撞端口。
+ *
+ * @param {{reachable: boolean, body: unknown}} probe
+ * @returns {'none' | 'our-standalone' | 'foreign'}
+ */
+export function classifyPortOccupant(probe) {
+  if (!probe || probe.reachable !== true) return 'none';
+  const body = probe.body;
+  const name = body !== null && typeof body === 'object' ? body.name : undefined;
+  return name === 'dsh-pet-standalone' ? 'our-standalone' : 'foreign';
+}
+
+/**
+ * 探一次端口：连不上 → `{reachable:false}`；连上 → 尽力解析 JSON 当 body。
+ * 非 JSON（HTML 错误页 / 空响应）→ body 为 undefined，分类会落到 `foreign`。
+ */
+export async function probePortOccupant(port) {
+  try {
+    const res = await fetch(petBaseUrl(port) + '/health', { signal: AbortSignal.timeout(1500) });
+    let body;
+    try {
+      body = await res.json();
+    } catch {
+      body = undefined;
+    }
+    return { reachable: true, body };
+  } catch {
+    return { reachable: false, body: undefined };
+  }
+}
+
 /** 失败时最多回读多少字节日志（错误总在末尾，不必整份读） */
 const OUTPUT_CAP = 16 * 1024;
 
@@ -68,11 +110,13 @@ const OUTPUT_CAP = 16 * 1024;
  * 用独立类而不是 Error + message：分类要的是**原文**，不是我们拼的一句话。
  */
 export class LaunchFailure extends Error {
-  constructor(message, { output = '', port } = {}) {
+  constructor(message, { output = '', port, reason } = {}) {
     super(message);
     this.name = 'LaunchFailure';
     this.output = output;
     this.port = port;
+    /** 已知原因（如 'foreign-occupant'）；分类器会优先用它，不必再从输出里猜 */
+    this.reason = reason;
   }
 }
 
@@ -106,16 +150,33 @@ function readNewLog(logStart) {
  * 常驻服务继续打日志会撞 EPIPE 而崩 —— 这是之前踩过的坑。
  *
  * @param port 端口（默认 3080，可用 DSH_PET_PORT 覆盖）
+ * @param port 端口
+ * @param deps 可注入 `probe` / `spawnFn`（单测用；默认走真实探测与真实 spawn）
  * @returns {{ alreadyRunning: boolean, entry: string, output: string }}
  */
-export async function ensurePetService(port) {
+export async function ensurePetService(port, deps = {}) {
+  const probe = deps.probe ?? probePortOccupant;
+  const spawnService = deps.spawnFn ?? spawn;
   const entry = join(PKG, 'lib', 'standalone.js');
   if (!existsSync(entry)) {
     throw new LaunchFailure(`找不到 ${entry}，先跑一次 pnpm bundle`, { port });
   }
-  if (await petHealth(port)) {
+
+  // 先分清端口上是谁。**判断在 spawn 之前**，因为 DSH 也占 3080：
+  // 判成"没在跑"就会一路撞端口 + 干等 30 秒，用户看到的是"双击没反应"。
+  const occupant = classifyPortOccupant(await probe(port));
+  if (occupant === 'our-standalone') {
     return { alreadyRunning: true, entry, output: '' };
   }
+  if (occupant === 'foreign') {
+    // 立刻失败，绝不 spawn、绝不进下面的等待循环
+    throw new LaunchFailure(`端口 ${port} 被别的程序占用（不是独立模式桌宠）`, {
+      port,
+      reason: 'foreign-occupant',
+      output: '',
+    });
+  }
+  // occupant === 'none'：端口空着，可以去起服务
 
   log(`启动服务：${entry} --port ${port}`);
   const logStart = (() => {
@@ -126,7 +187,7 @@ export async function ensurePetService(port) {
     }
   })();
   const fd = openSync(petLogPath(), 'a');
-  const child = spawn(process.execPath, [entry, '--port', String(port)], {
+  const child = spawnService(process.execPath, [entry, '--port', String(port)], {
     cwd: PKG,
     detached: true,
     windowsHide: true,

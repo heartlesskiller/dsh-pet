@@ -13,6 +13,7 @@ export type LaunchFailureReason =
   | 'port-busy'
   | 'electron-missing'
   | 'electron-downloading'
+  | 'foreign-occupant'
   | 'timeout'
   | 'unknown';
 
@@ -30,7 +31,15 @@ export interface LaunchFailureInfo {
 export function firstErrorLine(output: string): string;
 
 /** 判断启动失败的原因 */
-export function classifyLaunchFailure(input?: { output?: string; port?: number }): LaunchFailureInfo;
+export function classifyLaunchFailure(input?: {
+  output?: string;
+  port?: number;
+  /** 已知原因时直接指定（优先于从 output 推断） */
+  reason?: LaunchFailureReason | string;
+}): LaunchFailureInfo;
 
 /** 排成给人看的几行 */
 export function formatLaunchFailure(info: LaunchFailureInfo, logPath?: string): string;
+
+/** 「端口是别人占的」提示语（launcher / admin 两处文案不同） */
+export function foreignOccupantHint(where: 'launcher' | 'admin', port: number): string;

@@ -27,7 +27,19 @@ const HINTS = {
   },
   'port-busy': {
     title: '端口被占用',
-    hint: '别的程序占着这个端口。关掉它，或设环境变量 DSH_PET_PORT 换一个端口后再启动。',
+    hint:
+      '如果是 DSH 正在运行：请不要关掉它，也不要换端口——直接到 DSH 设置页 → 中转站管理。\n' +
+      '      如果是其它程序占用：关掉它，或设 DSH_PET_PORT 换端口后再启动\n' +
+      '      （注意：换端口后独立模式会与已存在的实例并行，可能互相覆盖站点配置）。',
+  },
+  // 端口上"能连上但不是我们的"（DSH 宿主 / 别的程序 / 404 / HTML）——
+  // 这种情况**绝不许 spawn**，所以和 port-busy（attempted bind）分开一条
+  'foreign-occupant': {
+    title: '端口被别的程序占用（不是独立模式桌宠）',
+    hint:
+      '如果是 DSH 正在运行：请不要关掉它，也不要换端口——直接到 DSH 设置页 → 中转站管理。\n' +
+      '      如果是其它程序占用：关掉它，或设 DSH_PET_PORT 换端口后再启动\n' +
+      '      （注意：换端口后独立模式会与已存在的实例并行，可能互相覆盖站点配置）。',
   },
   'electron-missing': {
     title: '服务起来了，但桌宠窗口没能创建（Electron 缺失或下载失败）',
@@ -69,6 +81,14 @@ export function classifyLaunchFailure(input = {}) {
   const text = String(input.output ?? '');
   const port = Number.isFinite(input.port) ? input.port : 3080;
 
+  // 调用方已经知道原因（如 LaunchFailure.reason === 'foreign-occupant'）→ 直接用，
+  // 不再拿输出猜（那条路径根本没有子进程输出，猜只会落到 unknown）
+  if (typeof input.reason === 'string' && Object.prototype.hasOwnProperty.call(HINTS, input.reason)) {
+    const explicit = HINTS[input.reason];
+    const explicitTitle = input.reason === 'port-busy' ? `${explicit.title}（端口 ${port}）` : explicit.title;
+    return { reason: input.reason, title: explicitTitle, hint: explicit.hint, detail: '' };
+  }
+
   let reason = 'unknown';
   if (/已有实例在运行/.test(text)) {
     reason = 'already-running';
@@ -98,4 +118,25 @@ export function formatLaunchFailure(info, logPath) {
   if (logPath) lines.push('    日志：' + logPath);
   lines.push('');
   return lines.join('\n');
+}
+
+/**
+ * 「端口是别人占的」这句话在两处叫法不同，集中在这里：
+ * - `launcher`（双击「桌宠」）：告诉 DSH 用户不需要双击
+ * - `admin`（双击「中转站管理」）：直接指路到 DSH 设置页，不打开浏览器
+ * @param {'launcher' | 'admin'} where
+ * @param {number} port
+ */
+export function foreignOccupantHint(where, port) {
+  if (where === 'admin') {
+    return (
+      `端口 ${port} 上跑的不是独立模式的桌宠（很可能是 DSH 宿主）。\n` +
+      '  如果你是 DSH 用户，请到 DSH 设置页 → 中转站管理（在「桌宠配置」下面一项）。\n' +
+      '  不需要双击这个快捷方式。'
+    );
+  }
+  return (
+    `端口 ${port} 被 DSH 或其它程序占用。\n` +
+    '  DSH 用户不需要双击这个快捷方式——服务由 DSH 自己起。'
+  );
 }

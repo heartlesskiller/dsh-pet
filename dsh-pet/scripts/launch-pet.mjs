@@ -17,7 +17,7 @@
  * 日志：`<DSH_HOME>/dsh-pet/launcher.log`（DSH_HOME 缺省 %USERPROFILE%\.dsh）
  * 退出码：0 = 已启动/已在运行；1 = 失败；3 = 服务起来了但桌宠窗口没出来（同样是用户可见的故障）
  */
-import { classifyLaunchFailure, formatLaunchFailure } from './launch-hints.mjs';
+import { classifyLaunchFailure, foreignOccupantHint, formatLaunchFailure } from './launch-hints.mjs';
 import { ensurePetService, LaunchFailure, log, petLogPath } from './pet-service.mjs';
 
 const PORT = Number(process.env.DSH_PET_PORT || 3080);
@@ -35,9 +35,19 @@ try {
     process.exitCode = 3;
   }
 } catch (e) {
-  // 分类要的是**原文**：LaunchFailure 带子进程输出；普通异常只能拿 message
-  const output = (e instanceof LaunchFailure ? e.output : '') + '\n' + (e?.message ?? String(e));
-  const info = classifyLaunchFailure({ output, port: PORT });
-  log(formatLaunchFailure(info, petLogPath()));
-  process.exitCode = 1;
+  // 端口是"别人占的"（很可能就是 DSH）→ 这句话与通用失败不同：DSH 用户根本不该双击这里
+  if (e instanceof LaunchFailure && e.reason === 'foreign-occupant') {
+    log(`\n  ✗ ${e.message}\n  ${foreignOccupantHint('launcher', PORT)}\n`);
+    process.exitCode = 1;
+  } else {
+    // 分类要的是**原文**：LaunchFailure 带子进程输出；普通异常只能拿 message
+    const output = (e instanceof LaunchFailure ? e.output : '') + '\n' + (e?.message ?? String(e));
+    const info = classifyLaunchFailure({
+      output,
+      port: PORT,
+      ...(e instanceof LaunchFailure && e.reason !== undefined ? { reason: e.reason } : {}),
+    });
+    log(formatLaunchFailure(info, petLogPath()));
+    process.exitCode = 1;
+  }
 }

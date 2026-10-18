@@ -12,7 +12,8 @@
  */
 import { spawn } from 'node:child_process';
 
-import { ensurePetService, log, petBaseUrl } from './pet-service.mjs';
+import { foreignOccupantHint } from './launch-hints.mjs';
+import { ensurePetService, LaunchFailure, log, petBaseUrl } from './pet-service.mjs';
 
 const PORT = Number(process.env.DSH_PET_PORT || 3080);
 const URL_TO_OPEN = petBaseUrl(PORT) + '/admin';
@@ -33,6 +34,13 @@ try {
   log(`${alreadyRunning ? '服务已在运行' : '服务已启动'}，打开管理页：${URL_TO_OPEN}`);
   await openBrowser(URL_TO_OPEN);
 } catch (e) {
-  log(`失败：${e instanceof Error ? e.message : String(e)}`);
-  process.exitCode = 1;
+  if (e instanceof LaunchFailure && e.reason === 'foreign-occupant') {
+    // 🔴 DSH 用户的主路径：3080 上跑的是 DSH，它没有 /admin 页。
+    // 绝不能打开浏览器（会是一个 404），也绝不干等 30 秒 —— 直接指路。
+    log('\n  ✗ ' + foreignOccupantHint('admin', PORT) + '\n');
+    process.exitCode = 2;
+  } else {
+    log(`失败：${e instanceof Error ? e.message : String(e)}`);
+    process.exitCode = 1;
+  }
 }

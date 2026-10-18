@@ -13,7 +13,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { classifyLaunchFailure, firstErrorLine, formatLaunchFailure } from '../../scripts/launch-hints.mjs';
+import {
+  classifyLaunchFailure,
+  firstErrorLine,
+  foreignOccupantHint,
+  formatLaunchFailure,
+} from '../../scripts/launch-hints.mjs';
 
 const read = (rel: string): string => readFileSync(new URL(rel, import.meta.url), 'utf8');
 
@@ -136,4 +141,37 @@ test('分类用的标记串在上游源码里仍然存在（防止改文案后�
     helperSrc.includes('cannot resolve Electron executable'),
     'helper-process 的 Electron 解析失败文案变了 → 请同步 launch-hints',
   );
+});
+
+// ---------- 端口被"别人"占：DSH 用户的主路径 ----------
+
+test('显式 reason=foreign-occupant（无子进程输出）也能正确分类', () => {
+  const info = classifyLaunchFailure({ reason: 'foreign-occupant', port: 3080 });
+  assert.equal(info.reason, 'foreign-occupant');
+  assert.ok(info.title.includes('不是独立模式桌宠'), info.title);
+  assert.equal(info.detail, '');
+});
+
+test('port-busy 文案不再给 DSH 用户错误建议（不许只说"关掉它/换端口"）', () => {
+  const info = classifyLaunchFailure({ output: OUT_PORT, port: 3080 });
+  // 必须同时说清两种情况：DSH 在跑（别关、别换端口）vs 其它程序（可以关/换）
+  assert.ok(info.hint.includes('DSH'), '必须提到 DSH 这种情况');
+  assert.ok(info.hint.includes('设置页'), 'DSH 用户要被告知去哪儿');
+  assert.ok(info.hint.includes('DSH_PET_PORT'), '其它程序的情况仍要给换端口的办法');
+  assert.ok(
+    info.hint.includes('互相覆盖'),
+    '换端口的副作用（并行实例互相覆盖站点配置）必须写明 —— 否则用户照做会丢站点',
+  );
+});
+
+test('foreignOccupantHint：launcher 与 admin 两处文案不同，各自指向正确', () => {
+  const launcher = foreignOccupantHint('launcher', 3080);
+  assert.ok(launcher.includes('DSH'));
+  assert.ok(launcher.includes('不需要双击这个快捷方式'));
+
+  const admin = foreignOccupantHint('admin', 3080);
+  assert.ok(admin.includes('3080'));
+  assert.ok(admin.includes('DSH 设置页'));
+  assert.ok(admin.includes('中转站管理'));
+  assert.ok(admin.includes('桌宠配置'), '要指明设置页里的位置');
 });
