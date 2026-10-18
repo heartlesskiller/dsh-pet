@@ -174,15 +174,15 @@
 | 13 | **T08 文档契约同步**：`openapi.yaml` 补 `/relays` 10 路径 + 9 个 schema + `RelayLeaf`/`sections.relays`（check:openapi 从失败转为全过：24 路径/29 操作/110 ref）；`API.md` 第五节中转站管理 + 「数据直返」子域例外写明 + 修正「端口顺延」过时描述；`README.md` fork 致谢（合规）+ 中转站管理章节 + 凭证明文落盘显著提示；`package.json` `forkedFrom` | 本轮 |
 | 14 | **T06 设置页中转站管理 UI**：`client/relays-admin.ts`（2423 行，站点 CRUD/detect 引导/凭证四选一/手工余额/焦点切换/三态兜底/未确认换算率强制核对）+ `app.ts` 注册 section（order 31）+ `scripts/dev/verify-relays-admin.ts`（API 层 + 渲染层双 EVIDENCE）；按 D3 砍「模型矩阵渲染」（保 CRUD+detect+focus 三件套）；测试 848→876 | `e9df63e` |
 | 15 | **T07 R0 宿主无关网关（S5/S7/S8）**：`host/capabilities.ts`（CapabilitySet 四槽 + L0–L3 档位表 + 端点→档位投影 + 能力投影）+ `host/gateway/{agents,capabilities,ingest,auth,identity,stream,index}.ts` + `standalone/discovery.ts`（gateways/<pid>.json + pid 校验 + 端口扫描兜底）+ `state.subscribe`（SSE 基座）+ 宿主接线（/capabilities · /agents[/hello] · /events · /state/stream，SSE 在 HTTP handler 前置拦截）+ cli 发现记录 + openapi/API.md 契约；`check:openapi` 29 路径/34 操作；测试 876→**929** | 本轮 |
+| 16 | **桌面快捷方式 + 交接报告**：`scripts/launch-pet.mjs`（幂等启动，不自己 spawn Electron——服务按 display:both 自动拉，重复会出两只）/ `scripts/stop-pet.mjs`（POST /shutdown 优雅停机）/ `assets/dsh-pet.ico` / `tools/make-shortcut.mjs`（Electron 原生 `shell.writeShortcutLink` + 读回校验；COM/WScript.Shell 在受限环境被硬禁）；桌面「桌宠 / 关闭桌宠」两个 .lnk；`docs/15-handover-2026-10-18.md` 交接报告。**顺带发现缺口：独立模式无 HTML 页 → T06 管理 UI 只在 DSH 里可达，已列为接手 P0** | `6d3e15e` `374ef48` |
 
-**累计新增单测：55（R1-R3）+ 47（S0/T02）+ 51（T03-T05）+ 28（T06）+ 53（T07）＝ 234 个，全部通过。**
+**累计新增单测：55（R1-R3）+ 47（S0/T02）+ 51（T03-T05）+ 28（T06）+ 53（T07）＝ 234 个（757 → 930 例），全部通过。**
 
-**TD-1 现状核对（07 §5 触发条件）**：`index.ts` 2145 行（fork 基线 1687 → 净增 +458，**未达 +500 触发线**）；`handleRelayRoute` ~249 行（触发线 >250，**已贴线**）；内联 handle*Route = 2 个真处理器 + 1 个 10 行薄转发（`handleGatewayRoute` 只转 `gateway.handle`，业务在 `host/gateway/`）。→ **结论：V1 仍按「接受内联」执行，但 handleRelayRoute 已贴触发线，V1.5 应优先做 S1 抽离**（`RouteModule` + 每子域一模块）。
-
-**累计新增单测：55（R1-R3）+ 47（S0/T02 轮）+ 51（T03/T04/T05 轮）＝ 153 个，全部通过。**
+**TD-1 现状核对（07 §5 触发条件）**：`index.ts` 2145 行（fork 基线 1687 → 净增 +458，**未达 +500 触发线**）；`handleRelayRoute` ~225–250 行（触发线 >250，**已贴线**）；内联 handle*Route = 2 个真处理器 + 1 个 10 行薄转发（`handleGatewayRoute` 只转 `gateway.handle`，业务在 `host/gateway/`）。→ **结论：V1 仍按「接受内联」执行，但 handleRelayRoute 已贴触发线，V1.5 应优先做 S1 抽离**（`RouteModule` + 每子域一模块）。
 
 ### 尚未闭环（如实记账，对照 11-plan-v1.1.md §5.2 待验证清单）
 
+0. **独立模式没有管理页**（2026-10-18 发现）：`relays-admin.ts` 是 DSH 设置页的 slot，独立模式 slot 注册是 no-op 且服务不提供 HTML 页 → 双击桌面快捷方式的用户**没有任何入口添加站点**。接手 P0，方案见 `docs/15-handover-2026-10-18.md` §5.1。
 1. **V1** `/api/user/self` 账户级余额真实形状 —— 需要一个 **AccessToken**（本站只有 API Key）
 2. **V2** 有额度（非无限）Key 的 `hard_limit_usd − total_usage/100` 剩余公式 —— 需要一个**有额度的 Key**
 3. **V3** Cloudflare 真拦截响应形态 —— 需要被挑战过的站点（判定表已按修订 #23 实现，未实测）
