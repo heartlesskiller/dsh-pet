@@ -1261,8 +1261,16 @@ class PetSprite {
       return;
     }
     if (leaf.action === 'open-admin') {
-      // 系统默认浏览器打开（与「打开网站」同一条路：shell.openExternal）
-      if (window.petBridge && window.petBridge.openDshSite) window.petBridge.openDshSite(ADMIN_URL);
+      // 必须走**独立通道** openAdminPage，不能复用 openDshSite：
+      // 后者（pet:open-site）在主进程里做了「同源替换」——发现 /admin 与宿主注入的
+      // DSH_PET_SITE_URL 同源时会把整个 URL 换成带令牌的站点根地址，/admin 的路径被吃掉，
+      // 用户看到的只是健康接口那段 JSON（本 bug 的根因）。
+      if (window.petBridge && window.petBridge.openAdminPage) {
+        window.petBridge.openAdminPage(ADMIN_URL);
+      } else {
+        // 方法不存在时别静默：这种"点了没反应"最难查
+        console.error('[dsh-pet] petBridge.openAdminPage 不存在，无法打开管理页', ADMIN_URL);
+      }
       return;
     }
     if (leaf.action === 'quit-pet') {

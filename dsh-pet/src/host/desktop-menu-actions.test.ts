@@ -29,6 +29,7 @@ const constants = readSource('../../runtime/electron-helper/constants.js');
 const clientPet = readSource('../client/pet.ts');
 const server = readSource('../standalone/server.ts');
 const mainJs = readSource('../../runtime/electron-helper/main.js');
+const preload = readSource('../../runtime/electron-helper/preload.js');
 
 /** 剥掉行/块注释：断言"代码里没有 X"时必须先剥注释，否则注释里的说明文字会误伤 */
 const stripComments = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
@@ -43,7 +44,7 @@ test('桌面壳：两个菜单项都在，且各有分发分支（否则点了�
 });
 
 test('桌面壳：open-admin 走系统默认浏览器，URL 从 configUrl 推导', () => {
-  assert.ok(/openDshSite\(ADMIN_URL\)/.test(sprite), 'open-admin 必须复用 openDshSite（系统默认浏览器）');
+  assert.ok(/openAdminPage\(ADMIN_URL\)/.test(sprite), 'open-admin 必须走 openAdminPage（独立通道）');
   assert.ok(/const ADMIN_URL = ORIGIN \+ '\/admin';/.test(constants), 'ADMIN_URL 必须由 ORIGIN 推导');
   // ORIGIN 来自 configUrl，端口随之变化 —— 绝不能写死
   assert.ok(/const ORIGIN = new URL\(CONFIG\.configUrl\)\.origin;/.test(constants));
@@ -154,4 +155,41 @@ test('GPU：win32 上既要 disableHardwareAcceleration 也要 Chromium 级 disa
   const win32 = /if \(process\.platform === 'win32'\) \{([\s\S]*?)\n\}/.exec(mainJs);
   assert.ok(win32, '找不到 win32 分支');
   assert.ok(/disable-gpu/.test(win32[1]), 'disable-gpu 必须在 win32 分支内');
+});
+
+// ---------- open-admin 必须走独立通道（本 bug：复用 open-site 会被同源替换吃掉路径） ----------
+
+test('🔴 open-admin 调 openAdminPage，绝不调 openDshSite', () => {
+  // 根因：openDshSite → pet:open-site → 主进程 openSite() 发现与 DSH_PET_SITE_URL 同源时
+  // 会把**整个 URL** 换成带令牌的站点根地址，/admin 的路径一起丢 → 用户只看到健康 JSON。
+  const branch = /if \(leaf\.action === 'open-admin'\) \{([\s\S]*?)\n {4}\}/.exec(sprite);
+  assert.ok(branch, '找不到 open-admin 分支');
+  // 剥注释：注释里会提到 openDshSite 作为"不要这样做"的反例
+  const body = stripComments(branch[1]);
+  assert.ok(/openAdminPage\(ADMIN_URL\)/.test(body), 'open-admin 必须调 openAdminPage(ADMIN_URL)');
+  assert.equal(/openDshSite/.test(body), false, 'open-admin 绝不许再走 openDshSite（会被同源替换吃路径）');
+  // 方法缺失时要留声，不能静默
+  assert.ok(/console\.error/.test(branch[1]), '桥方法不存在时必须 console.error，别静默失败');
+});
+
+test('🔴 pet:open-admin 处理器里不出现 DSH_PET_SITE_URL（不做同源替换）', () => {
+  const handler = /ipcMain\.on\('pet:open-admin'[\s\S]*?\n {2}\}\);/.exec(mainJs);
+  assert.ok(handler, 'main.js 必须注册 pet:open-admin');
+  assert.equal(/DSH_PET_SITE_URL/.test(handler[0]), false, '新通道绝不读 DSH_PET_SITE_URL（那是 #87 的令牌替换，会吃路径）');
+  assert.equal(/OPEN_TARGET/.test(handler[0]), false, '新通道不该判宿主形态');
+  assert.ok(/shell\.openExternal\(url\)/.test(handler[0]), '必须直接 openExternal 收到的 url');
+  // 只放行 http(s)
+  assert.ok(/\^https\?:\[\/\]\[\/\]/.test(handler[0]), '必须校验 url 形状，别的直接忽略');
+});
+
+test('preload 暴露 openAdminPage，且发的是 pet:open-admin 通道', () => {
+  assert.ok(/openAdminPage\(url\) \{\s*ipcRenderer\.send\('pet:open-admin'/.test(preload), 'preload 必须暴露 openAdminPage → pet:open-admin');
+});
+
+test('openSite / pet:open-site 的行为没被改动（#87 的令牌替换必须原样保留）', () => {
+  // 这条是防回归：修 open-admin 时不许顺手改掉「打开网站」的令牌逻辑，否则 DSH 会 401
+  assert.ok(/DSH_PET_SITE_URL/.test(mainJs), 'openSite 的令牌替换必须还在（#87）');
+  assert.ok(/new URL\(authed\)\.origin === new URL\(url\)\.origin/.test(mainJs), '同源替换逻辑必须原样');
+  assert.ok(/ipcMain\.on\('pet:open-site'/.test(mainJs), 'pet:open-site 通道必须还在');
+  assert.ok(/openDshSite\(url\) \{\s*ipcRenderer\.send\('pet:open-site'/.test(preload), 'openDshSite 必须还在（「打开网站」用）');
 });

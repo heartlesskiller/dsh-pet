@@ -37,6 +37,14 @@ contextBridge.exposeInMainWorld('petBridge', {
   openDshSite(url) {
     ipcRenderer.send('pet:open-site', { url });
   },
+  // 右键菜单「中转站管理…」：走**独立通道** pet:open-admin。
+  // 为什么不复用 pet:open-site：那条通道为 #87 做了「同源替换」——发现目标与宿主注入的
+  // DSH_PET_SITE_URL 同源时，会把**整个 URL** 换成带令牌的站点根地址，路径一起丢。
+  // 于是 /admin 被换成 http://127.0.0.1:3080/?token=xxx，用户看到的只是健康接口那段 JSON。
+  // /admin 是我们自己的路由（127.0.0.1 only、无鉴权），不需要令牌，所以必须绕开那条逻辑。
+  openAdminPage(url) {
+    ipcRenderer.send('pet:open-admin', { url });
+  },
   // ---- 宠物间碰撞（跨窗 broker）----
   reportFlight(state) {
     ipcRenderer.send('pet:report-flight', state);

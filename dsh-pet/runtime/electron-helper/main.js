@@ -824,6 +824,18 @@ app.whenReady().then(() => {
     });
   };
 
+  // 右键菜单「中转站管理…」：**独立通道，绕开上面的 openSite**。
+  // 这里只有一句 openExternal —— 不读 DSH_PET_SITE_URL、不判 OPEN_TARGET、不做同源替换。
+  // 理由：/admin 是本插件自己的路由（127.0.0.1 only、无鉴权），不需要令牌；而 openSite 的
+  // 同源替换（#87）会把同源的 /admin 整个换成带令牌的站点根地址，路径被吃掉。
+  ipcMain.on('pet:open-admin', (event, payload) => {
+    const url = payload && typeof payload === 'object' ? String(payload.url || '') : '';
+    if (!/^https?:[/][/]/.test(url)) return; // 只放行 http(s)，别的形状直接忽略
+    shell.openExternal(url).catch((error) => {
+      console.error('[dsh-pet-desktop-helper] open admin page failed:', error);
+    });
+  });
+
   // 去向由宿主形态决定（OPEN_TARGET，宿主按自身形态注入）：
   //   desktop（宿主 = DSH 桌面应用）→ 用应用自注册的 dsh:// 协议把主窗口叫回前台：已运行则第二个实例
   //     被单实例锁拦下、宿主收到 second-instance 后 focusPrimaryWindow()；未运行则协议直接把应用拉起来。
