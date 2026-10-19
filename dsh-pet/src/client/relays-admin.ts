@@ -42,10 +42,10 @@ import {
 // 这些形状按契约定型，改动以 API.md / openapi.yaml 为准（check:openapi 有守）。
 
 /** 站点类型（= provider 的 id 词干） */
-export type RelayKind = 'new-api' | 'sub2api' | 'openai-compat';
+export type RelayKind = 'new-api' | 'sub2api' | 'openai-compat' | 'deepseek';
 
 /** 全部站点类型（表单下拉用） */
-export const RELAY_KINDS: readonly RelayKind[] = ['new-api', 'sub2api', 'openai-compat'];
+export const RELAY_KINDS: readonly RelayKind[] = ['new-api', 'sub2api', 'openai-compat', 'deepseek'];
 
 /**
  * 凭证种类。**引导顺序即声明顺序：API Key 优先**（新版 new-api 经 /api/usage/token/
@@ -525,7 +525,7 @@ function parseSiteView(raw: unknown): RelaySiteAdminView {
   const name = o ? asStr(o.name) : undefined;
   const url = o ? asStr(o.url) : undefined;
   const kind = o?.kind;
-  if (!id || !name || !url || (kind !== 'new-api' && kind !== 'sub2api' && kind !== 'openai-compat')) {
+  if (!id || !name || !url || (kind !== 'new-api' && kind !== 'sub2api' && kind !== 'openai-compat' && kind !== 'deepseek')) {
     throw new RelaysApiError('站点响应缺少必填字段（id/name/url/kind）', 200);
   }
   const cred = asObj(o?.credential);
@@ -617,7 +617,7 @@ function parseDetect(raw: unknown): RelayDetectInfo {
   const confidence = o?.confidence;
   const evidence = Array.isArray(o?.evidence) ? o.evidence.filter((v): v is string => typeof v === 'string') : [];
   return {
-    kind: kind === 'new-api' || kind === 'sub2api' || kind === 'openai-compat' ? kind : 'unknown',
+    kind: kind === 'new-api' || kind === 'sub2api' || kind === 'openai-compat' || kind === 'deepseek' ? kind : 'unknown',
     confidence: confidence === 'certain' || confidence === 'likely' ? confidence : 'unknown',
     evidence,
     ...(o !== undefined && typeof o.suggestedQuotaPerUnit === 'number' && Number.isFinite(o.suggestedQuotaPerUnit)
@@ -849,6 +849,7 @@ export const zh: Record<string, string> = {
   'kind.new-api': 'new-api / one-api',
   'kind.sub2api': 'Sub2API',
   'kind.openai-compat': 'OpenAI 兼容',
+  'kind.deepseek': 'DeepSeek 官方',
   noteLabel: '备注',
   noteHint: '可选：站点用途、到期时间等，只在本页显示。',
   credLabel: '凭证',
@@ -1016,6 +1017,7 @@ export const en: Record<string, string> = {
   'kind.new-api': 'new-api / one-api',
   'kind.sub2api': 'Sub2API',
   'kind.openai-compat': 'OpenAI-compatible',
+  'kind.deepseek': 'DeepSeek official',
   noteLabel: 'Note',
   noteHint: 'Optional: purpose, expiry date, etc. Shown on this page only.',
   credLabel: 'Credential',

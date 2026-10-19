@@ -363,7 +363,7 @@ describe('mapLimit —— 并发受限映射（批量刷新/探测用）', () =>
 
 describe('契约常量与字典', () => {
   test('RELAY_KINDS / CREDENTIAL_KINDS：顺序即引导顺序（API Key 优先）', () => {
-    assert.deepEqual([...RELAY_KINDS], ['new-api', 'sub2api', 'openai-compat']);
+    assert.deepEqual([...RELAY_KINDS], ['new-api', 'sub2api', 'openai-compat', 'deepseek']);
     assert.deepEqual([...CREDENTIAL_KINDS], ['api-key', 'access-token', 'session-cookie', 'manual']);
   });
 

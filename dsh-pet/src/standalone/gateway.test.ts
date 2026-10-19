@@ -79,7 +79,7 @@ describe('网关 E2E（真实 HTTP）', () => {
     assert.equal(body.hostCapabilities.credentials, 'local-file');
     assert.equal(body.hostCapabilities.sessionEvents, 'http', '独立模式的事件来源是 HTTP 摄入');
     assert.ok(body.tiers.L0.includes('/capabilities'));
-    assert.deepEqual(body.relayKinds, ['new-api', 'openai-compat']);
+    assert.deepEqual(body.relayKinds, ['new-api', 'openai-compat', 'deepseek']);
     assert.equal(body.tokenRequired, false);
   });
 

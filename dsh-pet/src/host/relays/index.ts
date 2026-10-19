@@ -11,6 +11,7 @@
 import { getCredential } from './store';
 import { newApiProvider } from './providers/newapi';
 import { openaiCompatProvider } from './providers/openai-compat';
+import { deepseekProvider } from './providers/deepseek';
 import { sumMoney } from '../balance/internal';
 import type {
   RelayBalanceResult,
@@ -20,7 +21,7 @@ import type {
 } from './types';
 
 /** 已登记的站点类型（登记口径：只收有接口的，其余 → `unsupported`） */
-export const RELAY_PROVIDERS: RelayProvider[] = [newApiProvider, openaiCompatProvider];
+export const RELAY_PROVIDERS: RelayProvider[] = [newApiProvider, openaiCompatProvider, deepseekProvider];
 
 /** 站点类型 → provider；未登记返回 undefined（= 不支持查询） */
 export function matchRelayProvider(kind: string): RelayProvider | undefined {
@@ -150,8 +151,11 @@ export async function querySiteBalance(dir: string, site: RelaySite): Promise<Re
     });
     failureMemory.delete(site.id); // 成功：清除失败记忆
     // 换算率未确认（建站默认 / 探测失败，修订 #11）→ 打标：客户端提示核对，
-    // 且该站不参与低余额告警（OP-6：数据不可靠不评估）
-    if (site.rateConfirmed !== true) return { ...r, siteId: site.id, rateUnconfirmed: true };
+    // 且该站不参与低余额告警（OP-6：数据不可靠不评估）。
+    // 只对**读数要经换算率折算**的类型打标（usesQuotaRate 缺省 true）：纯金额源
+    // （billing USD / DeepSeek CNY）没有换算率可言，打标会让它永远无法告警。
+    const needsRate = provider.usesQuotaRate !== false;
+    if (needsRate && site.rateConfirmed !== true) return { ...r, siteId: site.id, rateUnconfirmed: true };
     return { ...r, siteId: site.id };
   } catch (e) {
     noteFailure(site.id, Date.now());

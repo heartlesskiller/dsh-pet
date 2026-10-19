@@ -530,6 +530,8 @@ export async function fetchSiteModels(
 export const newApiProvider: RelayProvider = {
   kinds: ['new-api'],
   credentialKinds: ['access-token', 'api-key', 'session-cookie'],
+  // 账户级/令牌级读数都是 quota，要经 quotaPerUnit 折算 → 换算率未确认要打标
+  usesQuotaRate: true,
   async fetch(ctx) {
     const base = normalizeBaseUrl(ctx.baseUrl);
     // 三级取数链路按凭证类型分流（修订 #20：凭证类型之间不自动降级，只做端内降级）

@@ -38,13 +38,14 @@ function badResult(siteId: string, reason: 'fetch-error' | 'credential-missing' 
   return { ok: false, siteId, provider: 'relay:new-api', reason };
 }
 
-test('注册表：new-api 与 openai-compat 已登记，sub2api / 未知类型未登记', () => {
+test('注册表：new-api / openai-compat / deepseek 已登记，sub2api / 未知类型未登记', () => {
   assert.ok(matchRelayProvider('new-api'));
   assert.ok(matchRelayProvider('openai-compat'));
+  assert.ok(matchRelayProvider('deepseek'), 'deepseek 官方余额（2026-10-19 真 key 实测后登记）');
   // sub2api 契约里声明了但适配器还没写 → 必须落 unsupported，不能静默通过
   assert.equal(matchRelayProvider('sub2api'), undefined);
   assert.equal(matchRelayProvider('bogus'), undefined);
-  assert.deepEqual(supportedKinds(), ['new-api', 'openai-compat']);
+  assert.deepEqual(supportedKinds(), ['new-api', 'openai-compat', 'deepseek']);
 });
 
 test('querySiteBalance：未登记类型 → unsupported（不静默失败）', async () => {
@@ -294,6 +295,31 @@ test('querySiteBalance：修订 #11 —— rateConfirmed 未确认 → 成功结
       assert.ok(!('rateUnconfirmed' in r), '已确认就不该有标记键');
     },
   );
+});
+
+test('querySiteBalance：usesQuotaRate=false 的纯金额源（deepseek）→ 不打 rateUnconfirmed', async () => {
+  // 2026-10-19 真数据实测发现的瑕疵：DeepSeek 读数直接是 CNY 金额、没有换算率可言，
+  // 旧逻辑一律打标会让它永远无法参与低余额告警（¥4.88 该报不报）。
+  const dir = tmp();
+  const s = mkSite(dir, { kind: 'deepseek' }); // 建站默认 rateConfirmed:false
+  putCredential(dir, s.id, { kind: 'api-key', secret: 'sk-test' });
+  const fake: RelayProvider = {
+    kinds: ['deepseek'],
+    credentialKinds: ['api-key'],
+    usesQuotaRate: false,
+    fetch: async () =>
+      ({ ok: true, provider: 'relay:deepseek', shape: 'money', source: 'auto', scope: 'account', data: { currency: 'CNY', total: '4.88', granted: '3.54', toppedUp: '1.34' } }) as never,
+  };
+  const original = RELAY_PROVIDERS[2]; // deepseek 槽位
+  RELAY_PROVIDERS[2] = fake;
+  try {
+    const r = await querySiteBalance(dir, s);
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.ok(!('rateUnconfirmed' in r), '纯金额源不该被换算率标记挡住告警');
+  } finally {
+    RELAY_PROVIDERS[2] = original;
+  }
 });
 
 test('querySiteBalance：A6 —— provider 抛 blocked / rate-limited → 归类为对应 reason', async () => {

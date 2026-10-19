@@ -21,6 +21,8 @@ export const openaiCompatProvider: RelayProvider = {
   kinds: ['openai-compat'],
   // 通用兼容站只认模型 Key（billing 端点的鉴权口径）
   credentialKinds: ['api-key'],
+  // billing 双端点直接返回 USD 金额，不经过 quota 换算 → 不打 rateUnconfirmed
+  usesQuotaRate: false,
   async fetch(ctx) {
     return fetchViaBilling(normalizeBaseUrl(ctx.baseUrl), ctx, RELAY_PROVIDER_PREFIX + 'openai-compat');
   },

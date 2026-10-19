@@ -22,11 +22,12 @@ import type { MoneyBalance } from '../balance/types';
  * - `new-api`：new-api / one-api 系（`GET /api/user/self`，系统访问令牌 AccessToken）
  * - `sub2api`：Sub2API 系（`GET <base>/usage`，sk key 自查）
  * - `openai-compat`：通用 OpenAI 兼容兜底（`GET <base>/dashboard/billing/subscription`）
+ * - `deepseek`：DeepSeek 官方（`GET <base>/user/balance`，模型 Key 即可；2026-10-19 真 key 实测）
  */
-export type RelayKind = 'new-api' | 'sub2api' | 'openai-compat';
+export type RelayKind = 'new-api' | 'sub2api' | 'openai-compat' | 'deepseek';
 
 /** 全部站点类型（注册表自检用：漏登记会在测试里炸） */
-export const RELAY_KINDS: readonly RelayKind[] = ['new-api', 'sub2api', 'openai-compat'];
+export const RELAY_KINDS: readonly RelayKind[] = ['new-api', 'sub2api', 'openai-compat', 'deepseek'];
 
 // ---------- 凭证 ----------
 
@@ -224,6 +225,15 @@ export interface RelayProvider {
   kinds: RelayKind[];
   /** 该类型支持的凭证种类（用于表单校验：不允许给 new-api 选 manual 之外查不到的组合） */
   credentialKinds: RelayCredentialKind[];
+  /**
+   * 该类型的取数是否依赖 `quotaPerUnit`（quota ↔ 金额换算率）。
+   * - `true`（缺省）：读数要经换算率折算（new-api 的 `/api/user/self`、`/api/usage/token/`），
+   *   站点 `rateConfirmed !== true` 时结果带 `rateUnconfirmed`，且不参与低余额告警（修订 #11/OP-6）；
+   * - `false`：读数**直接就是金额**（billing 双端点的 USD、DeepSeek 的 CNY 余额），
+   *   换算率对它无意义 —— 此时**不**打 `rateUnconfirmed`，否则一个纯金额源会永远无法告警
+   *   （2026-10-19 真数据实测发现的瑕疵：DeepSeek ¥4.88 被无意义的换算率标记挡在告警外）。
+   */
+  usesQuotaRate?: boolean;
   /**
    * 取数 + 解析。**只负责成功路径**：任何失败（HTTP 非 2xx、字段缺失/非法、未登录、
    * 被 Cloudflare 拦）一律 `throw`，由查询入口统一落成 `fetch-error`。

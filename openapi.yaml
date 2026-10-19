@@ -2244,7 +2244,7 @@ components:
           description: "Base URL（自动归一化：去尾斜杠、去 /v1 后缀）"
         kind:
           type: string
-          enum: [new-api, sub2api, openai-compat]
+          enum: [new-api, sub2api, openai-compat, deepseek]
         note:
           type: string
         quotaPerUnit:
@@ -2413,7 +2413,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [new-api, sub2api, openai-compat, unknown]
+          enum: [new-api, sub2api, openai-compat, deepseek, unknown]
         confidence:
           type: string
           enum: [certain, likely, unknown]
