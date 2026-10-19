@@ -34,6 +34,10 @@ const HINTS = {
   },
   // 端口上"能连上但不是我们的"（DSH 宿主 / 别的程序 / 404 / HTML）——
   // 这种情况**绝不许 spawn**，所以和 port-busy（attempted bind）分开一条
+  'build-failed': {
+    title: '构建失败，仍在用旧版',
+    hint: '看日志里的 [build] 行（多半是 TS 编译错误）。修好后重新构建：pnpm build',
+  },
   'foreign-occupant': {
     title: '端口被别的程序占用（不是独立模式桌宠）',
     hint:

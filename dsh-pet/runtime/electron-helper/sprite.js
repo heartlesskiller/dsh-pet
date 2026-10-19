@@ -1190,6 +1190,12 @@ class PetSprite {
       S.displayMenuBranch(),
       // 改配置文件后免去回设置页点保存：请宿主重启桌面 Helper（全部桌面宠物窗口按最新配置重建）。
       // 放在最后：它是"重新加载"这类维护动作，与上面几个宠物互动项语义不同。
+      // 中转站管理：用系统默认浏览器打开 /admin（URL 从 configUrl 推导，不写死端口）。
+      // 已知限制：bridge（DSH）模式下该路由在 DSH 服务上不存在，会开出一个 404 页。
+      { label: '中转站管理…', action: 'open-admin' },
+      // 退出桌宠：先请服务停机（只有独立模式注册了 /shutdown），失败就只关本窗口 ——
+      // **绝不能**让 DSH 整个退出（用户的 DSH 应用不能被菜单杀掉）。
+      { label: '退出桌宠', action: 'quit-pet' },
       { label: '重载配置', action: 'reload' },
     );
     const tree = tools.concat(S.buildMenuTree(this.animations));
@@ -1246,6 +1252,15 @@ class PetSprite {
     }
     if (leaf.action === 'reload') {
       this.reloadDesktop(); // 请宿主重启桌面 Helper：全部桌面宠物窗口按最新配置重建
+      return;
+    }
+    if (leaf.action === 'open-admin') {
+      // 系统默认浏览器打开（与「打开网站」同一条路：shell.openExternal）
+      if (window.petBridge && window.petBridge.openDshSite) window.petBridge.openDshSite(ADMIN_URL);
+      return;
+    }
+    if (leaf.action === 'quit-pet') {
+      this.quitPet();
       return;
     }
     if (!leaf.anim) return;
@@ -1356,6 +1371,28 @@ class PetSprite {
   // （events.js 的 loopsStarted 门控），就地重建 sprite 会漏启新循环或留下旧定时器。
   // 本请求由**即将被重启的这个进程**发出：响应可能永远不回（宿主杀进程时回调地址已失效），
   // 故不 await、不重试，失败只记日志——重载本身就是把本进程换掉。
+  /**
+   * 退出桌宠：先请服务停机，再关本窗口。
+   *
+   * - POST /shutdown 只有**独立模式**注册（src/standalone/server.ts）；DSH 下会 404，
+   *   必须容忍 —— 绝不能因此把用户的 DSH 应用一起退掉。
+   * - 关窗后服务若还在（DSH 模式）属正常，**不要 taskkill**（会留下半透明残影、也可能误杀）。
+   */
+  quitPet() {
+    S.postAction(SHUTDOWN_URL)
+      .then((ok) => {
+        if (!ok) console.info('[dsh-pet] /shutdown 未成功（多半是 DSH 模式没有这个路由），只关桌面窗口');
+      })
+      .catch(() => {
+        // 同上：DSH 模式下静默降级
+      })
+      .finally(() => {
+        // preload 里没有 quitApp 桥（只有 openDshSite），所以直接关窗。
+        // **不要 taskkill**：强杀会留下半透明残影，也可能误杀同名的别的进程。
+        window.close();
+      });
+  }
+
   reloadDesktop() {
     fetch(BASE + '/reload', { method: 'POST' }).catch((e) => {
       console.warn('[dsh-pet] 重载配置请求失败（宿主不可达？）', e);

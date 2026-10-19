@@ -144,6 +144,12 @@ const ORIGIN = new URL(CONFIG.configUrl).origin;
 const BASE = BRIDGE ? 'dsh-pet-bridge://dsh-pet/dsh-pet-7340' : ORIGIN + '/dsh-pet-7340';
 const STATE_URL = BASE + '/state'; // 轮询统一状态 S：前端 1s 轮询的唯一数据源（余额/工作状态/通知/说话）
 const BALANCE_URL = BASE + '/balance'; // 余额刷新动作（POST，写 S；数据本身从 /state 读）
+// 管理页与停机：这两个路由注册在**服务根**（src/standalone/server.ts），不在 /dsh-pet-7340/ 下，
+// 所以用 ORIGIN 而不是 BASE。端口从 configUrl 推导 —— **绝不写死 3080**（DSH 的端口不固定）。
+// 已知限制：bridge（DSH）模式下 ORIGIN 指向 DSH 自己的服务，这两个路由在它那儿不存在
+// （/admin 会开出一个 404 页、/shutdown 会 404 被容忍）。不加第二套菜单，DSH 用户走设置页。
+const ADMIN_URL = ORIGIN + '/admin';
+const SHUTDOWN_URL = ORIGIN + '/shutdown';
 const WHISPER_URL = BASE + '/whisper';
 const BUBBLE_DURATION_MS = 10 * 1000; // 余额/碎碎念气泡展示时长（与浏览器一致：定时自动消失，与动画解耦）
 // 窗口四周外扩 = 该比例 × 宠物尺寸：为气泡 / 未来可能的弹窗预留显示空间；

@@ -1443,6 +1443,26 @@ export function makePetUI(rt: {
           .catch((e: unknown) => console.warn('[dsh-pet] 显示位置切换失败', e));
         return;
       }
+      if (leaf.action === 'open-admin') {
+        // 用**当前页面 origin** 推导，绝不写死 3080：DSH 模式下页面 origin 就是 DSH 自己的
+        // HTTP 服务地址（端口不固定），独立模式下就是本机服务。
+        // 注意：/admin 只有独立模式注册（src/standalone/server.ts），DSH 下会 404 ——
+        // 这是已知限制，不加第二套菜单，DSH 用户从设置页进。
+        const url = new URL('/admin', window.location.origin);
+        window.open(url.toString(), '_blank', 'noopener');
+        return;
+      }
+      if (leaf.action === 'quit-pet') {
+        // 先请服务停机（只有独立模式注册了 /shutdown；DSH 下会 404 —— 必须容忍，
+        // 绝不能因此把用户的 DSH 应用一起退掉）。无论成败都关掉本窗口。
+        // 注意路径：/shutdown 注册在**根**（src/standalone/server.ts），不在 /dsh-pet-7340/ 下
+        void fetch('/shutdown', { method: 'POST' })
+          .catch(() => {
+            // DSH 模式没有这个路由：静默降级为"只关桌面窗口"
+          })
+          .finally(() => window.close());
+        return;
+      }
       if (leaf.action === 'home') {
         // 回到初始位置：停漫游/移动/抛掷，清掉拖拽/漫游留下的会话位置，回配置角落
         stopThrow();
@@ -1476,6 +1496,10 @@ export function makePetUI(rt: {
         { label: '碎碎念', action: 'whisper' },
         { label: '对话', action: 'chat' },
         { label: '回到初始位置', action: 'home' },
+        // 中转站管理：开 /admin 页（独立模式才有；DSH 模式下同源没有这个路由，会 404 —— 见下方注释）
+        { label: '中转站管理…', action: 'open-admin' },
+        // 退出桌宠：POST /shutdown（只有独立模式注册了这个路由），失败就只关本窗口
+        { label: '退出桌宠', action: 'quit-pet' },
         // 显示位置（仅网页/仅桌面/两者/都不）：与桌面端注入**同一份**子菜单。
         // 改成不含 web 的值（仅桌面/都不）后，本宠物会随即从 visiblePets 里消失——字面意义上的"自己走掉"。
         displayMenuBranch(),

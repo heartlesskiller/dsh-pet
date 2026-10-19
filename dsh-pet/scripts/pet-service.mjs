@@ -11,10 +11,12 @@
  *   - detached + windowsHide：关掉脚本所在窗口不影响常驻服务；
  *   - 已在运行就什么都不做：双击多次也只有一只桌宠。
  */
-import { spawn } from 'node:child_process';
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { needsRebuild, newestMtimeMs } from './build-freshness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 /** dsh-pet 包根（scripts/ 的上一级） */
@@ -139,6 +141,83 @@ function readNewLog(logStart) {
   }
 }
 
+/** 构建产物（lib/standalone.js） */
+const LIB_ENTRY = () => join(PKG, 'lib', 'standalone.js');
+
+/**
+ * 递归收集目录下所有文件的 mtime（纯数据收集，判断交给 needsRebuild）。
+ * 只扫 `src/`：lib 与 runtime/shared-core.js 都只由 src/ 生成；
+ * runtime/ 下其余文件是 Electron 直接加载的手写 JS，不参与 lib 构建。
+ */
+function collectMtimes(dir, out = []) {
+  let names;
+  try {
+    names = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const item of names) {
+    const full = join(dir, item.name);
+    if (item.isDirectory()) {
+      collectMtimes(full, out);
+    } else if (item.isFile()) {
+      try {
+        out.push({ mtimeMs: statSync(full).mtimeMs });
+      } catch {
+        // 单个文件读不到不该让整次检测失败
+      }
+    }
+  }
+  return out;
+}
+
+/** 跑一条构建命令；返回是否成功（输出直接进 launcher.log，用户能看到） */
+function runBuild(label, args) {
+  log(`[build] ${label}…`);
+  const fd = openSync(petLogPath(), 'a');
+  const result = spawnSync(process.execPath, args, {
+    cwd: PKG,
+    stdio: ['ignore', fd, fd],
+    windowsHide: true,
+  });
+  if (result.status === 0) {
+    log(`[build] ${label} 完成`);
+    return true;
+  }
+  log(`[build] ${label} 失败（exit=${result.status}）`);
+  return false;
+}
+
+/**
+ * 源码比产物新就重建。**构建失败绝不静默启动旧代码** —— 抛出去让 .cmd pause 住，
+ * 用户看到"构建失败，仍在用旧版"而不是默默跑旧行为。
+ */
+async function ensureFreshBuild() {
+  const libMtime = (() => {
+    try {
+      return statSync(LIB_ENTRY()).mtimeMs;
+    } catch {
+      return NaN;
+    }
+  })();
+  const srcNewest = newestMtimeMs(collectMtimes(join(PKG, 'src')));
+  if (!needsRebuild(libMtime, srcNewest)) return;
+
+  log('检测到源码更新，重新构建…');
+  // 两个产物都由 src/ 生成：桌面菜单在 shared-core.js 里，服务在 lib/ 里。
+  // 先建 shared-core 再建 lib，让 lib 保持最新（检测只比 src，不受产物顺序影响）。
+  const coreOk = runBuild('桌面共享核心（shared-core.js）', [join('scripts', 'build-desktop-core.mjs')]);
+  const libOk = runBuild('构建 lib/standalone.js（tsdown）', [
+    join('node_modules', 'tsdown', 'bin', 'tsdown.js'),
+  ]);
+  if (!coreOk || !libOk) {
+    throw new LaunchFailure('构建失败，仍在用旧版（见日志里的 [build] 行）', {
+      reason: 'build-failed',
+      output: '',
+    });
+  }
+}
+
 /**
  * 确保独立服务在跑。
  *
@@ -177,6 +256,10 @@ export async function ensurePetService(port, deps = {}) {
     });
   }
   // occupant === 'none'：端口空着，可以去起服务
+
+  // 陈旧检测：源码比构建产物新 → 先重建，再启动。
+  // 不重建的话用户改了代码双击还是旧行为，会以为"改了没生效"。
+  await ensureFreshBuild();
 
   log(`启动服务：${entry} --port ${port}`);
   const logStart = (() => {

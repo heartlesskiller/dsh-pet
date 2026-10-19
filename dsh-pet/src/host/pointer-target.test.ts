@@ -303,7 +303,10 @@ describe('守卫：渲染端的输入租约必须在位（helper 随包发行，
   test('建立点：拖拽成立 / 菜单开 / 弹窗开都上报', () => {
     // 拖拽：onPointerDown 里立刻上报（不等过阈值——按下瞬间窗口就已经必须保持可交互）
     assert.ok(
-      /setPointerCapture[\s\S]{0,600}?this\.syncInputBusy\(\)/.test(sprite),
+      // 窗口放到 900：原 600 是随手写的，e17e89b 给 onPointerDown 加了注释后实际距离 615，
+      // 于是这条**在 HEAD 上就已经是红的**（与本次改动无关）。断言意图是"按下后立刻上报"，
+      // 615 字符仍在同一函数体内、仍在拖拽状态建立之后，放宽窗口不削弱语义。
+      /setPointerCapture[\s\S]{0,900}?this\.syncInputBusy\(\)/.test(sprite),
       'onPointerDown 必须在建立拖拽状态后上报 busy',
     );
     assert.ok(
