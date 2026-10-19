@@ -1187,11 +1187,10 @@ class PetSprite {
       // 与浏览器端注入的是**同一份**子菜单（shared 的 displayMenuBranch），两端文案/取值不会漂移。
       // 为什么不就地关窗/开窗：桌面宠物共用一个 Electron 进程，窗口是进程启动时按 DSH_PET_PETS
       // 一次性建的——就地增删窗口既改不了磁盘配置（下次启动又回来）也改不了窗口数量。
-      // 「显示位置 → 都不」在**独立模式**下是单向门：桌宠从两端同时消失，而独立模式没有
-      // 设置页、菜单又长在这个看不见的桌宠上 —— 用户从此没有可视化入口改回来。
-      // 所以桌面壳对这一项加二次确认（浏览器壳跑在 DSH 里，有设置页，不加）。
-      ...(RUN_MODE === 'standalone' ? [confirmNoneLeaf()] : []),
-      S.displayMenuBranch(),
+      // 显示位置按运行形态过滤：独立模式下去掉「仅网页」「都不」——这两个在独立模式都是死路
+      // （没有网页 UI / 两端都没且没有设置页可改回）。用户已经被各咬过一次，所以事前就不给选。
+      // **不改共享的 displayMenuBranch()**（DSH 也要用全四项），只在这里过滤。
+      displayBranchForMode(),
       // 改配置文件后免去回设置页点保存：请宿主重启桌面 Helper（全部桌面宠物窗口按最新配置重建）。
       // 放在最后：它是"重新加载"这类维护动作，与上面几个宠物互动项语义不同。
       // 中转站管理：用系统默认浏览器打开 /admin（URL 从 configUrl 推导，不写死端口）。
@@ -1251,8 +1250,6 @@ class PetSprite {
       return;
     }
     if (leaf.action === 'set-display') {
-      // 带 confirmText 的叶子（目前只有独立模式的「都不」）先拦一道：这是单向门，别让用户误点
-      if (leaf.confirmText && !window.confirm(leaf.confirmText)) return;
       this.setPetDisplay(leaf.display); // 改这只宠物的显示位置：写 display 配置，由宿主重载生效
       return;
     }
@@ -1393,19 +1390,16 @@ class PetSprite {
    * - 关窗后服务若还在（DSH 模式）属正常，**不要 taskkill**（会留下半透明残影、也可能误杀）。
    */
   /**
-   * 独立模式下「都不」这一项的二次确认。
-   * 返回一个**普通叶子**（action 仍是 set-display/display:'none'），确认逻辑挂在点击时 ——
-   * 这样不加新 action、不加第二套菜单，只是多一道拦截。
+   * 「显示位置」子菜单按运行形态过滤。
+   * 共享的 `S.displayMenuBranch()` **不改**（浏览器壳/DSH 要用全四项），只在这里按形态筛。
    */
-  confirmNoneLeaf() {
+  displayBranchForMode() {
+    const branch = S.displayMenuBranch();
+    if (RUN_MODE !== 'standalone') return branch; // bridge：四项全保留（DSH 有设置页）
+    const allowed = S.allowedDisplayOptions('standalone');
     return {
-      label: '都不（桌宠会从两端消失）',
-      action: 'set-display',
-      display: 'none',
-      confirmText:
-        '选了两端都不显示后，桌宠会从桌面和网页同时消失。\n' +
-        '独立模式没有设置页，恢复只能改配置文件或重启「桌宠」快捷方式（启动器会自动改回桌面显示）。\n' +
-        '确定继续吗？',
+      ...branch,
+      children: (branch.children || []).filter((leaf) => allowed.includes(leaf.display)),
     };
   }
 

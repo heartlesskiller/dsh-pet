@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { quitPetLabel, shouldShutdownService } from '../shared/menu';
+import { allowedDisplayOptions, isDisplayDeadEnd, quitPetLabel, shouldShutdownService } from '../shared/menu';
 
 /** 包内文件源码（守卫用；相对 src/host/ 解析） */
 const readSource = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
@@ -134,15 +134,34 @@ test('浏览器壳：恒为 bridge 形态，quit-pet 不发任何请求', () => 
 
 // ---------- 「显示位置 → 都不」是单向门，桌面壳必须拦一道 ----------
 
-test('桌面壳：独立模式下「都不」有二次确认，且确认里说清了恢复办法', () => {
-  assert.ok(/confirmNoneLeaf\(\)/.test(sprite), '桌面壳必须注入带确认的「都不」叶子');
-  assert.ok(/RUN_MODE === 'standalone' \? \[confirmNoneLeaf\(\)\] : \[\]/.test(sprite),
-    '确认只在独立模式加（浏览器壳跑在 DSH 里，有设置页，不加）');
-  assert.ok(/leaf\.confirmText && !window\.confirm\(leaf\.confirmText\)/.test(sprite),
-    'set-display 分支必须先过 confirmText 才执行');
-  // 文案必须说清"去哪恢复"——否则用户确认了还是回不来
-  assert.ok(/独立模式没有设置页/.test(sprite), '确认文案必须点明独立模式没有设置页');
-  assert.ok(/启动器会自动改回桌面显示/.test(sprite), '确认文案必须告诉用户启动器会自愈');
+test('🔴 桌面壳：独立模式过滤掉「仅网页」「都不」（事前防止，不是事后确认）', () => {
+  // 用户已经被 none、web 各咬过一次。启动器自愈是**事后 recovery**，菜单过滤是**事前 prevention**，
+  // 两层都要。独立模式下这两个选项根本不该出现。
+  assert.ok(/displayBranchForMode\(\)/.test(sprite), '桌面壳必须用 displayBranchForMode() 而不是直接 displayMenuBranch()');
+  const fn = /displayBranchForMode\(\) \{([\s\S]*?)\n {2}\}/.exec(sprite);
+  assert.ok(fn, '找不到 displayBranchForMode 实现');
+  const body = stripComments(fn[1]);
+  assert.ok(/RUN_MODE !== 'standalone'/.test(body), '非独立模式必须原样返回（DSH 四项都要）');
+  assert.ok(/allowedDisplayOptions\('standalone'\)/.test(body), '独立模式必须用共享的 allowedDisplayOptions 判定');
+  assert.ok(/\.filter\(/.test(body), '必须真的过滤 children');
+});
+
+test('🔴 共享的 displayMenuBranch() 未被改动（仍是四项，别把 DSH 也带坏）', () => {
+  const menu = readSource('../shared/menu.ts');
+  const fn = /export const displayMenuBranch = \(\): MenuBranch => \(\{([\s\S]*?)\}\);/.exec(menu);
+  assert.ok(fn, '找不到 displayMenuBranch');
+  const body = stripComments(fn[1]);
+  // 四项必须都在（DSH 壳要用全四项）
+  for (const [label, display] of [
+    ['仅网页', 'web'],
+    ['仅桌面', 'desktop'],
+    ['两者', 'both'],
+    ['都不', 'none'],
+  ] as Array<[string, string]>) {
+    assert.ok(body.includes(`'${label}'`) && body.includes(`'${display}'`), `displayMenuBranch 必须仍含「${label}」(${display})`);
+  }
+  // 且里面不许出现按形态判断的逻辑（过滤是调用方的事）
+  assert.equal(/RUN_MODE|standalone/.test(body), false, 'displayMenuBranch 是两端共用的，不该知道运行形态');
 });
 
 test('GPU：win32 上既要 disableHardwareAcceleration 也要 Chromium 级 disable-gpu', () => {
@@ -192,4 +211,24 @@ test('openSite / pet:open-site 的行为没被改动（#87 的令牌替换必须
   assert.ok(/new URL\(authed\)\.origin === new URL\(url\)\.origin/.test(mainJs), '同源替换逻辑必须原样');
   assert.ok(/ipcMain\.on\('pet:open-site'/.test(mainJs), 'pet:open-site 通道必须还在');
   assert.ok(/openDshSite\(url\) \{\s*ipcRenderer\.send\('pet:open-site'/.test(preload), 'openDshSite 必须还在（「打开网站」用）');
+});
+
+// ---------- 「显示位置」死路选项（事前防止） ----------
+
+test('allowedDisplayOptions：standalone 只给 desktop/both，bridge 给全四项', () => {
+  assert.deepEqual(allowedDisplayOptions('standalone'), ['desktop', 'both']);
+  assert.deepEqual(allowedDisplayOptions('bridge'), ['web', 'desktop', 'both', 'none']);
+});
+
+test('isDisplayDeadEnd：standalone 下 web/none 是死路，bridge 下都不是', () => {
+  assert.equal(isDisplayDeadEnd('web', 'standalone'), true);
+  assert.equal(isDisplayDeadEnd('none', 'standalone'), true);
+  assert.equal(isDisplayDeadEnd('desktop', 'standalone'), false);
+  assert.equal(isDisplayDeadEnd('both', 'standalone'), false);
+  // bridge 下四项都合法（DSH 有设置页，恢复得回来）
+  for (const d of ['web', 'desktop', 'both', 'none']) {
+    assert.equal(isDisplayDeadEnd(d, 'bridge'), false, `bridge 下 ${d} 不该是死路`);
+  }
+  // 未知值一律当死路（宁可少给一个选项，也别给个恢复不回来的）
+  assert.equal(isDisplayDeadEnd('nonsense', 'standalone'), true);
 });

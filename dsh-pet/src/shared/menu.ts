@@ -360,3 +360,28 @@ export function shouldShutdownService(mode: PetRunMode): boolean {
 export function quitPetLabel(mode: PetRunMode): string {
   return mode === 'bridge' ? '桌面桌宠退走' : '退出桌宠';
 }
+
+// ---------- 「显示位置」哪些选项在给定形态下是安全的 ----------
+
+/** 显示位置的四个取值（与 displayMenuBranch() 的 children 一一对应） */
+export type DisplayOption = 'web' | 'desktop' | 'both' | 'none';
+
+/**
+ * 该运行形态下**允许出现**的「显示位置」选项。
+ *
+ * - `standalone`（独立模式）：只有 `desktop` / `both`。另两个是死路 ——
+ *   `web` 意味着桌宠只存在于 DSH 的网页 UI 里，而独立模式**没有网页界面**；
+ *   `none` 两端都不显示，且独立模式没有设置页能改回来。用户已经被这两个坑各咬过一次，
+ *   所以**事前就不该出现在菜单里**（启动器自愈是事后 recovery，两层都要）。
+ * - `bridge`（DSH）：四项全保留 —— DSH 有设置页，四个值都恢复得回来。
+ *
+ * 注意：`displayMenuBranch()` 本身**不改**（两端共用），过滤由调用方按形态做。
+ */
+export function allowedDisplayOptions(mode: PetRunMode): DisplayOption[] {
+  return mode === 'standalone' ? ['desktop', 'both'] : ['web', 'desktop', 'both', 'none'];
+}
+
+/** 该形态下这个 display 取值是不是死路（不该出现在菜单里） */
+export function isDisplayDeadEnd(display: unknown, mode: PetRunMode): boolean {
+  return !allowedDisplayOptions(mode).includes(display as DisplayOption);
+}
