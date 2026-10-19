@@ -10,10 +10,20 @@
  * 判断是纯函数 → 能无文件系统单测（四种边界：lib 新 / 一样新 / lib 旧 / lib 缺失）。
  * 取 mtime 是有 IO 的那半边，留在 `pet-service.mjs` 里，只负责喂数据。
  *
- * ## 扫哪些目录（这里只做判断，不扫）
- * 只扫 `src/**` —— 因为 `lib/standalone.js` 与 `runtime/electron-helper/shared-core.js`
- * **都只由 src/ 生成**。`runtime/` 下其余文件是 Electron 直接加载的手写 JS，
- * 不参与 lib 的构建，把它们算进来只会让检测永远为真（尤其 shared-core.js 本身就是产物）。
+ * ## 扫哪些目录：**只扫 `src/**`，别把 `runtime/` 加进来**
+ * （下一段是"为什么"，改之前先读完 —— 加 runtime/ 会让检测永远为真，见下。）
+ *
+ * 原因：
+ *   1. `lib/standalone.js` 与 `runtime/electron-helper/shared-core.js` **都只由 `src/` 生成**
+ *      （前者 tsdown，后者 scripts/build-desktop-core.mjs）。所以"源码变了"完全由 `src/` 反映。
+ *   2. `runtime/` 下其余文件（main.js / sprite.js / constants.js …）是 Electron **直接加载**的
+ *      手写 JS，**不参与 lib 的构建** —— 改它们不需要重建 lib。
+ *   3. 🔴 最关键的坑：`runtime/electron-helper/shared-core.js` **本身就是构建产物**。
+ *      每次构建它都会变新，于是"runtime/ 里有比 lib 新的文件"恒成立 → 检测永远为真 →
+ *      每次启动都白重建一遍。把 runtime/ 加进来等于把这项优化彻底作废。
+ *
+ * 那桌面菜单改了怎么办？陈旧时**同时重建两个产物**（shared-core.js + lib），
+ * 见 pet-service.mjs 的 ensureFreshBuild()。判据仍只看 src/，产物顺序不影响判定。
  */
 
 /**

@@ -1193,9 +1193,9 @@ class PetSprite {
       // 中转站管理：用系统默认浏览器打开 /admin（URL 从 configUrl 推导，不写死端口）。
       // 已知限制：bridge（DSH）模式下该路由在 DSH 服务上不存在，会开出一个 404 页。
       { label: '中转站管理…', action: 'open-admin' },
-      // 退出桌宠：先请服务停机（只有独立模式注册了 /shutdown），失败就只关本窗口 ——
-      // **绝不能**让 DSH 整个退出（用户的 DSH 应用不能被菜单杀掉）。
-      { label: '退出桌宠', action: 'quit-pet' },
+      // 退出桌宠：label 按运行形态变（bridge 下服务不属于我们，说"退出桌宠"是误导）。
+      // **同一个 action**，不加第二套菜单。
+      { label: S.quitPetLabel(RUN_MODE), action: 'quit-pet' },
       { label: '重载配置', action: 'reload' },
     );
     const tree = tools.concat(S.buildMenuTree(this.animations));
@@ -1379,6 +1379,12 @@ class PetSprite {
    * - 关窗后服务若还在（DSH 模式）属正常，**不要 taskkill**（会留下半透明残影、也可能误杀）。
    */
   quitPet() {
+    // 🔴 bridge（DSH）模式：**一个网络请求都不发**。DSH 是用户的工作环境，不是我们的桌宠；
+    // 万一它也有同名 /shutdown 路由，这一下会把用户的 DSH 整个关掉 —— 后果不可接受。
+    if (!S.shouldShutdownService(RUN_MODE)) {
+      window.close();
+      return;
+    }
     S.postAction(SHUTDOWN_URL)
       .then((ok) => {
         if (!ok) console.info('[dsh-pet] /shutdown 未成功（多半是 DSH 模式没有这个路由），只关桌面窗口');

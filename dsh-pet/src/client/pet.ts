@@ -45,6 +45,8 @@ import {
   MENU_CSS,
   type MenuLeaf,
   type MenuNode,
+  quitPetLabel,
+  shouldShutdownService,
 } from '../shared/menu';
 // 悬浮提示：与桌面共用同一份样式与摆位判据（替代原先挂在命中层上的原生 title 提示）
 import { TOOLTIP_CLASS, TOOLTIP_CSS, TOOLTIP_GAP_RATIO, tooltipPlacement } from '../shared/tooltip';
@@ -1453,14 +1455,15 @@ export function makePetUI(rt: {
         return;
       }
       if (leaf.action === 'quit-pet') {
-        // 先请服务停机（只有独立模式注册了 /shutdown；DSH 下会 404 —— 必须容忍，
-        // 绝不能因此把用户的 DSH 应用一起退掉）。无论成败都关掉本窗口。
-        // 注意路径：/shutdown 注册在**根**（src/standalone/server.ts），不在 /dsh-pet-7340/ 下
-        void fetch('/shutdown', { method: 'POST' })
-          .catch(() => {
-            // DSH 模式没有这个路由：静默降级为"只关桌面窗口"
-          })
-          .finally(() => window.close());
+        // 浏览器壳恒为 bridge 形态（跑在 DSH 的页面里）→ shouldShutdownService 为 false
+        // → **一个网络请求都不发**。DSH 是用户的工作环境，万一它也有同名 /shutdown 路由，
+        // 这一下会把用户的 DSH 整个关掉。所以这里只关窗口。
+        if (shouldShutdownService('bridge')) {
+          // 独立形态才走这里（浏览器壳不会，但判据只有一处，别在调用方重复）
+          void fetch('/shutdown', { method: 'POST' }).finally(() => window.close());
+        } else {
+          window.close();
+        }
         return;
       }
       if (leaf.action === 'home') {
@@ -1498,8 +1501,8 @@ export function makePetUI(rt: {
         { label: '回到初始位置', action: 'home' },
         // 中转站管理：开 /admin 页（独立模式才有；DSH 模式下同源没有这个路由，会 404 —— 见下方注释）
         { label: '中转站管理…', action: 'open-admin' },
-        // 退出桌宠：POST /shutdown（只有独立模式注册了这个路由），失败就只关本窗口
-        { label: '退出桌宠', action: 'quit-pet' },
+        // 退出桌宠：label 由形态决定（浏览器壳恒为 bridge —— 它跑在 DSH 的页面里）
+        { label: quitPetLabel('bridge'), action: 'quit-pet' },
         // 显示位置（仅网页/仅桌面/两者/都不）：与桌面端注入**同一份**子菜单。
         // 改成不含 web 的值（仅桌面/都不）后，本宠物会随即从 visiblePets 里消失——字面意义上的"自己走掉"。
         displayMenuBranch(),

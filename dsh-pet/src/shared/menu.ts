@@ -329,3 +329,34 @@ export function mountContextMenu(opts: {
 
   return { el: root, close };
 }
+
+// ---------- 运行形态与「退出桌宠」的安全判据 ----------
+
+/**
+ * 运行形态：
+ * - `bridge`     跑在 DSH 里（宿主是 DSH 桌面应用，请求走自定义 scheme 转发）
+ * - `standalone` 独立模式（本插件自己起的 HTTP 服务）
+ */
+export type PetRunMode = 'bridge' | 'standalone';
+
+/**
+ * 「退出桌宠」要不要真的去停服务。
+ *
+ * 🔴 **bridge 模式必须返回 false（一个网络请求都不发）**：
+ * `/shutdown` 只有独立模式注册（src/standalone/server.ts）。DSH 是**用户的工作环境**，
+ * 不是我们的桌宠 —— 万一 DSH 自己也有个同名 `/shutdown` 路由，这一下会把用户的 DSH
+ * 整个关掉。这个后果不可接受，而收益（DSH 模式下顺便停服务）近乎零。
+ *
+ * 判据用**运行形态**，不猜：桌面壳从 helper 收到的 config（bridge=1）就知道自己是哪种。
+ */
+export function shouldShutdownService(mode: PetRunMode): boolean {
+  return mode === 'standalone';
+}
+
+/**
+ * 「退出桌宠」的菜单文案按形态变 —— **同一个 action，不加第二套菜单**。
+ * bridge 模式下服务不属于我们，说"退出桌宠"是误导，说"桌面桌宠退走"才准确。
+ */
+export function quitPetLabel(mode: PetRunMode): string {
+  return mode === 'bridge' ? '桌面桌宠退走' : '退出桌宠';
+}

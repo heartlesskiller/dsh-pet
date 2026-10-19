@@ -19,6 +19,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import { quitPetLabel, shouldShutdownService } from '../shared/menu';
+
 /** 包内文件源码（守卫用；相对 src/host/ 解析） */
 const readSource = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
 
@@ -34,7 +36,7 @@ const stripComments = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, 
 
 test('桌面壳：两个菜单项都在，且各有分发分支（否则点了没反应）', () => {
   assert.ok(/label: '中转站管理…', action: 'open-admin'/.test(sprite), '桌面壳必须有「中转站管理…」菜单项');
-  assert.ok(/label: '退出桌宠', action: 'quit-pet'/.test(sprite), '桌面壳必须有「退出桌宠」菜单项');
+  assert.ok(/label: S\.quitPetLabel\(RUN_MODE\), action: 'quit-pet'/.test(sprite), '桌面壳必须有 quit-pet 菜单项（label 按形态变）');
   assert.ok(/leaf\.action === 'open-admin'/.test(sprite), 'onMenuAction 必须有 open-admin 分支');
   assert.ok(/leaf\.action === 'quit-pet'/.test(sprite), 'onMenuAction 必须有 quit-pet 分支');
 });
@@ -58,7 +60,7 @@ test('桌面壳：quit-pet 先 POST /shutdown，失败容忍，且不 taskkill',
 
 test('浏览器壳：两个菜单项都在，且各有分发分支', () => {
   assert.ok(/label: '中转站管理…', action: 'open-admin'/.test(clientPet), '浏览器壳必须有「中转站管理…」菜单项');
-  assert.ok(/label: '退出桌宠', action: 'quit-pet'/.test(clientPet), '浏览器壳必须有「退出桌宠」菜单项');
+  assert.ok(/label: quitPetLabel\('bridge'\), action: 'quit-pet'/.test(clientPet), '浏览器壳必须有 quit-pet 菜单项（label 按形态变）');
   assert.ok(/leaf\.action === 'open-admin'/.test(clientPet), 'handleMenuAction 必须有 open-admin 分支');
   assert.ok(/leaf\.action === 'quit-pet'/.test(clientPet), 'handleMenuAction 必须有 quit-pet 分支');
 });
@@ -89,4 +91,41 @@ test('shared/menu.ts 的 action 联合类型包含两个新动作', () => {
   const menu = readSource('../shared/menu.ts');
   assert.ok(/'open-admin'/.test(menu), 'MenuLeaf.action 必须含 open-admin');
   assert.ok(/'quit-pet'/.test(menu), 'MenuLeaf.action 必须含 quit-pet');
+});
+
+// ---------- 「退出桌宠」的安全判据（纯函数） ----------
+
+test('shouldShutdownService：只有独立形态才去停服务', () => {
+  assert.equal(shouldShutdownService('standalone'), true);
+  // 🔴 bridge 必须 false：DSH 是用户的工作环境，万一它也有同名 /shutdown 路由，
+  // 发这一下会把用户的 DSH 整个关掉 —— 后果不可接受，收益近乎零。
+  assert.equal(shouldShutdownService('bridge'), false);
+});
+
+test('quitPetLabel：同一个 action，文案按形态变（不加第二套菜单）', () => {
+  assert.equal(quitPetLabel('standalone'), '退出桌宠');
+  assert.equal(quitPetLabel('bridge'), '桌面桌宠退走');
+  assert.notEqual(quitPetLabel('bridge'), quitPetLabel('standalone'), '两种形态文案必须不同');
+});
+
+// ---------- 两个壳都按这个判据走 ----------
+
+test('桌面壳：bridge 形态下 quit-pet 一个请求都不发', () => {
+  // 判据来自 helper 收到的 config（bridge=1），不猜
+  assert.ok(/const RUN_MODE = BRIDGE \? 'bridge' : 'standalone';/.test(constants), '必须由 BRIDGE 推导 RUN_MODE');
+  assert.ok(/const BRIDGE = params\.get\('bridge'\) === '1';/.test(constants), 'BRIDGE 来自 config 参数');
+  // quitPet 必须先过 shouldShutdownService 才可能碰网络
+  assert.ok(/if \(!S\.shouldShutdownService\(RUN_MODE\)\) \{[\s\S]{0,200}window\.close\(\)/.test(sprite),
+    'bridge 形态必须先关窗再 return，绝不能往下走到 postAction');
+  // label 按形态变
+  assert.ok(/label: S\.quitPetLabel\(RUN_MODE\), action: 'quit-pet'/.test(sprite), '菜单 label 必须按形态变');
+});
+
+test('浏览器壳：恒为 bridge 形态，quit-pet 不发任何请求', () => {
+  assert.ok(/shouldShutdownService\('bridge'\)/.test(clientPet), '浏览器壳必须走同一个判据');
+  assert.ok(/label: quitPetLabel\('bridge'\)/.test(clientPet), '浏览器壳 label 也用共享函数');
+  // 浏览器壳里不得出现无条件发出的 /shutdown
+  const stripped = stripComments(clientPet);
+  assert.equal(/fetch\('\/shutdown'/.test(stripped) && !/shouldShutdownService/.test(stripped), false,
+    '不得绕过判据直接 fetch /shutdown');
 });
