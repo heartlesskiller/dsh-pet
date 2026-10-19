@@ -105,7 +105,18 @@ export function parseConfigText(text) {
  *   - `changed:false` 时 `value` 原样返回（调用方不该写盘）
  *   - `reason` 是给人看的一句话（自愈时打印）
  */
-export function planDisplayHeal(config) {
+/**
+ * 判断要不要自愈，并给出改完的配置。
+ *
+ * @param {unknown} config 已解析的配置对象
+ * @param {{mode?: 'standalone' | 'bridge'}} [options]
+ *   - `standalone`（独立模式启动器）：`none` 与 `web` **都是死路** —— 独立模式没有网页界面，
+ *     `web` 意味着桌宠只存在于 DSH 的网页 UI 里，而这里根本没有那个 UI。
+ *   - `bridge` / 不传：只治 `none`（DSH 下 `web` 是合法的，由 DSH 设置页管）。
+ * @returns {{changed:boolean, reason:string, value:unknown}}
+ */
+export function planDisplayHeal(config, options = {}) {
+  const mode = options && options.mode === 'standalone' ? 'standalone' : 'bridge';
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     return { changed: false, reason: '配置不是对象（形状异常，不动它）', value: config };
   }
@@ -113,21 +124,28 @@ export function planDisplayHeal(config) {
   if (!Array.isArray(pets)) {
     return { changed: false, reason: '配置里没有 pets 数组（不动它）', value: config };
   }
+  // 死路值：none 两端都没有；web 在独立模式下等于没有（没有网页 UI）
+  const dead = mode === 'standalone' ? ['none', 'web'] : ['none'];
+  const why = (value) =>
+    value === 'web' ? '只在网页显示（独立模式没有网页界面，桌宠等于不可见）' : '不在桌面显示';
+
   let healed = 0;
+  let lastValue = '';
   const nextPets = pets.map((pet) => {
     if (pet === null || typeof pet !== 'object' || Array.isArray(pet)) return pet;
     const p = pet;
-    // **只治 none**：其他值（web/both/缺失/非法）都可能是用户有意为之
-    if (p.display !== 'none') return pet;
+    // **只治死路值**：desktop / both / 缺失 / 非法都可能是用户有意为之，一律不动
+    if (!dead.includes(p.display)) return pet;
     healed += 1;
+    lastValue = p.display;
     return { ...p, display: 'desktop' };
   });
   if (healed === 0) {
-    return { changed: false, reason: '没有需要自愈的宠物（display 均不为 none）', value: config };
+    return { changed: false, reason: '没有需要自愈的宠物', value: config };
   }
   return {
     changed: true,
-    reason: `检测到 ${healed} 只桌宠被设置为「不在桌面显示」（可能是之前从菜单选了「都不」），已自动改为「桌面显示」`,
+    reason: `检测到 ${healed} 只桌宠被设置为「${why(lastValue)}」，已自动改为「桌面显示」`,
     value: { ...config, pets: nextPets },
   };
 }

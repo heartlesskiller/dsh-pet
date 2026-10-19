@@ -24,4 +24,7 @@ export function stripJsonComments(text: string): string;
 export function parseConfigText(text: string): { ok: true; value: unknown } | { ok: false; message: string };
 
 /** 判断要不要把 `display:"none"` 自愈成 `"desktop"`（只治这一种） */
-export function planDisplayHeal(config: unknown): DisplayHealPlan;
+export function planDisplayHeal(
+  config: unknown,
+  options?: { mode?: 'standalone' | 'bridge' },
+): DisplayHealPlan;

@@ -222,21 +222,21 @@ const CONFIG_FILE = () => join(petDataDir(), 'main-config.jsonc');
  * 纪律：**改用户配置前必须备份**（原子写：临时文件 + rename），备份名带日期时间。
  * 配置损坏时**不清洗**，只警告 —— 写坏一个已经坏的文件只会更坏。
  */
-function healDisplayNone() {
+function healDisplay() {
   const file = CONFIG_FILE();
   let text;
   try {
     text = readFileSync(file, 'utf8');
   } catch {
-    return; // 没有配置文件：用包内默认（display 默认就是 desktop），无需自愈
+    return { changed: false }; // 没有配置文件：用包内默认（display 默认就是 desktop），无需自愈
   }
   const parsed = parseConfigText(text);
   if (!parsed.ok) {
     log(`配置损坏，未做自愈（${parsed.message}）：${file}`);
-    return;
+    return { changed: false };
   }
-  const plan = planDisplayHeal(parsed.value);
-  if (!plan.changed) return;
+  const plan = planDisplayHeal(parsed.value, { mode: 'standalone' });
+  if (!plan.changed) return { changed: false };
 
   // 先备份，再原子写
   const backup = `${file}.bak-${backupSuffix()}`;
@@ -245,10 +245,11 @@ function healDisplayNone() {
     writeJsonAtomic(file, plan.value);
   } catch (e) {
     log(`自愈失败（配置未改动）：${e instanceof Error ? e.message : String(e)}`);
-    return;
+    return { changed: false };
   }
   log(plan.reason);
   log(`原配置已备份到：${backup}`);
+  return { changed: true };
 }
 
 /**
@@ -304,10 +305,22 @@ export async function ensurePetService(port, deps = {}) {
     throw new LaunchFailure(`找不到 ${entry}，先跑一次 pnpm bundle`, { port });
   }
 
+  // 🔴 自愈必须放在**最前面**（在下面的 alreadyRunning 早退之前）。
+  // 曾经放在 spawn 之前 → 服务已经在跑时走了早退，自愈一次都没执行，
+  // 用户连点 4 次快捷方式都没用（这就是"双击没反应"的直接原因）。
+  // 独立模式下 display 为 none / web 都是死路（没有网页界面），每次启动都治。
+  const healed = healDisplay();
+
   // 先分清端口上是谁。**判断在 spawn 之前**，因为 DSH 也占 3080：
   // 判成"没在跑"就会一路撞端口 + 干等 30 秒，用户看到的是"双击没反应"。
   const occupant = classifyPortOccupant(await probe(port));
   if (occupant === 'our-standalone') {
+    // 自愈改了配置、但服务正带着旧配置在跑 → 明确告知，**不自动 /shutdown**
+    // （那会不经用户同意杀掉他眼前的桌宠）。
+    if (healed.changed) {
+      log('配置已修正为「桌面显示」，但桌宠正在用旧配置运行。');
+      log('请右键桌宠 → 重载配置，或双击「关闭桌宠」后再双击「桌宠」。');
+    }
     return { alreadyRunning: true, entry, output: '' };
   }
   if (occupant === 'foreign') {
@@ -319,9 +332,6 @@ export async function ensurePetService(port, deps = {}) {
     });
   }
   // occupant === 'none'：端口空着，可以去起服务
-
-  // 自愈：display:"none" 在独立模式是死路（没有设置页能改回来），先治它
-  healDisplayNone();
 
   // 陈旧检测：源码比构建产物新 → 先重建，再启动。
   // 不重建的话用户改了代码双击还是旧行为，会以为"改了没生效"。
