@@ -12,11 +12,25 @@
  *   - 已在运行就什么都不做：双击多次也只有一只桌宠。
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, statSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { needsRebuild, newestMtimeMs } from './build-freshness.mjs';
+import { backupSuffix, parseConfigText, planDisplayHeal } from './config-heal.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 /** dsh-pet 包根（scripts/ 的上一级） */
@@ -188,6 +202,55 @@ function runBuild(label, args) {
   return false;
 }
 
+/** 原子写 JSON：临时文件 + rename（改用户配置必须走这条） */
+function writeJsonAtomic(path, value) {
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
+  renameSync(tmp, path);
+}
+
+/** 主配置文件路径（与 host 同一份：$DSH_HOME/dsh-pet/main-config.jsonc） */
+const CONFIG_FILE = () => join(petDataDir(), 'main-config.jsonc');
+
+/**
+ * 自愈 `display:"none"` → `"desktop"`。
+ *
+ * 为什么必须做：菜单「显示位置 → 都不」会把桌宠从两端同时藏掉，而独立模式**没有设置页**、
+ * 菜单又长在那个看不见的桌宠上 —— 用户双击快捷方式什么都没发生，且无从改回。
+ * 用户双击这个快捷方式，意图就是"我要看到桌宠"。
+ *
+ * 纪律：**改用户配置前必须备份**（原子写：临时文件 + rename），备份名带日期时间。
+ * 配置损坏时**不清洗**，只警告 —— 写坏一个已经坏的文件只会更坏。
+ */
+function healDisplayNone() {
+  const file = CONFIG_FILE();
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return; // 没有配置文件：用包内默认（display 默认就是 desktop），无需自愈
+  }
+  const parsed = parseConfigText(text);
+  if (!parsed.ok) {
+    log(`配置损坏，未做自愈（${parsed.message}）：${file}`);
+    return;
+  }
+  const plan = planDisplayHeal(parsed.value);
+  if (!plan.changed) return;
+
+  // 先备份，再原子写
+  const backup = `${file}.bak-${backupSuffix()}`;
+  try {
+    copyFileSync(file, backup);
+    writeJsonAtomic(file, plan.value);
+  } catch (e) {
+    log(`自愈失败（配置未改动）：${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  log(plan.reason);
+  log(`原配置已备份到：${backup}`);
+}
+
 /**
  * 源码比产物新就重建。**构建失败绝不静默启动旧代码** —— 抛出去让 .cmd pause 住，
  * 用户看到"构建失败，仍在用旧版"而不是默默跑旧行为。
@@ -256,6 +319,9 @@ export async function ensurePetService(port, deps = {}) {
     });
   }
   // occupant === 'none'：端口空着，可以去起服务
+
+  // 自愈：display:"none" 在独立模式是死路（没有设置页能改回来），先治它
+  healDisplayNone();
 
   // 陈旧检测：源码比构建产物新 → 先重建，再启动。
   // 不重建的话用户改了代码双击还是旧行为，会以为"改了没生效"。

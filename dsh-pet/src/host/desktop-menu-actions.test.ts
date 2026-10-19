@@ -28,6 +28,7 @@ const sprite = readSource('../../runtime/electron-helper/sprite.js');
 const constants = readSource('../../runtime/electron-helper/constants.js');
 const clientPet = readSource('../client/pet.ts');
 const server = readSource('../standalone/server.ts');
+const mainJs = readSource('../../runtime/electron-helper/main.js');
 
 /** 剥掉行/块注释：断言"代码里没有 X"时必须先剥注释，否则注释里的说明文字会误伤 */
 const stripComments = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
@@ -128,4 +129,29 @@ test('浏览器壳：恒为 bridge 形态，quit-pet 不发任何请求', () => 
   const stripped = stripComments(clientPet);
   assert.equal(/fetch\('\/shutdown'/.test(stripped) && !/shouldShutdownService/.test(stripped), false,
     '不得绕过判据直接 fetch /shutdown');
+});
+
+// ---------- 「显示位置 → 都不」是单向门，桌面壳必须拦一道 ----------
+
+test('桌面壳：独立模式下「都不」有二次确认，且确认里说清了恢复办法', () => {
+  assert.ok(/confirmNoneLeaf\(\)/.test(sprite), '桌面壳必须注入带确认的「都不」叶子');
+  assert.ok(/RUN_MODE === 'standalone' \? \[confirmNoneLeaf\(\)\] : \[\]/.test(sprite),
+    '确认只在独立模式加（浏览器壳跑在 DSH 里，有设置页，不加）');
+  assert.ok(/leaf\.confirmText && !window\.confirm\(leaf\.confirmText\)/.test(sprite),
+    'set-display 分支必须先过 confirmText 才执行');
+  // 文案必须说清"去哪恢复"——否则用户确认了还是回不来
+  assert.ok(/独立模式没有设置页/.test(sprite), '确认文案必须点明独立模式没有设置页');
+  assert.ok(/启动器会自动改回桌面显示/.test(sprite), '确认文案必须告诉用户启动器会自愈');
+});
+
+test('GPU：win32 上既要 disableHardwareAcceleration 也要 Chromium 级 disable-gpu', () => {
+  // 只调 disableHardwareAcceleration 不够：Chromium 仍会拉起 GPU 子进程，
+  // 在 GPU 不可用的环境那个子进程 FATAL，整个 helper 退出 → 重启 → 再崩（最多 12 次）。
+  assert.ok(/app\.disableHardwareAcceleration\(\)/.test(mainJs), '必须保留 disableHardwareAcceleration（#37 透明窗）');
+  assert.ok(/appendSwitch\('disable-gpu'\)/.test(mainJs), '必须加 Chromium 级 disable-gpu');
+  assert.ok(/appendSwitch\('disable-gpu-compositing'\)/.test(mainJs), '必须加 disable-gpu-compositing');
+  // 两个开关都要在 win32 分支里（macOS/Linux 合成路径不同，别一刀切）
+  const win32 = /if \(process\.platform === 'win32'\) \{([\s\S]*?)\n\}/.exec(mainJs);
+  assert.ok(win32, '找不到 win32 分支');
+  assert.ok(/disable-gpu/.test(win32[1]), 'disable-gpu 必须在 win32 分支内');
 });

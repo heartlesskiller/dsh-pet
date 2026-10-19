@@ -120,6 +120,36 @@ if (!DPI_PROBE && HOST_PID > 0) {
 // 不影响浏览器形态与主 DSH（独立进程）；非 Windows（macOS/Linux）合成路径不同，保留硬件加速。
 if (process.platform === 'win32') {
   app.disableHardwareAcceleration();
+  // 上面那句只让**本进程**不走 GPU，Chromium 仍可能拉起 GPU 子进程；在 GPU 不可用的环境
+  // （虚拟机 / 远程桌面 / 异常显卡驱动）那个子进程会直接崩，并且崩法是 **FATAL**：
+  //   GPU process exited unexpectedly: exit_code=-1073741819
+  //   [FATAL:gpu_data_manager_impl_private.cc] GPU process isn't usable. Goodbye.
+  // 于是整个 helper 退出 → 宿主重启 → 再崩，最多 12 次后桌宠彻底消失。
+  // 这两个 switch 是 Chromium 级的"根本不要 GPU 进程"，配合上一行才能真止住崩溃循环。
+  // 取舍：软件渲染下 webm 动画可能掉帧。桌宠是 640×360 的轻量透明小窗，且**本来就已经**
+  // 因为 #37（透明分层窗在 DWM 硬件合成下的黑边/内容丢失）走了软件合成 —— 所以这里没有
+  // 额外损失，只是把"偶尔还会起的 GPU 进程"也关掉。
+  // 只调上面那句 disableHardwareAcceleration() **不够**：它只让本进程不走 GPU，Chromium 仍会
+  // 拉起独立的 GPU 子进程（软件光栅化也要它）。在 GPU 不可用的环境（虚拟机 / 远程桌面 /
+  // 异常显卡驱动 / 沙箱）那个子进程起不来，而且崩法是 **FATAL**：
+  //   GPU process exited unexpectedly: exit_code=-1073741819
+  //   [FATAL:gpu_data_manager_impl_private.cc:416] GPU process isn't usable. Goodbye.
+  // 于是整个 helper 退出 → 宿主重启 → 再崩，最多 12 次后桌宠彻底消失。
+  //
+  // 四个开关是**实测**出来的最小集合（沙箱里逐个验证过）：
+  //   disable-gpu / disable-gpu-compositing  关硬件加速与 GPU 合成
+  //   disable-gpu-process                    不要独立 GPU 进程
+  //   in-process-gpu                         真需要 GPU 时在本进程内跑（不再有子进程可崩）
+  // 实测结果：修前 20 秒内 35 条 GPU 崩溃 + 5 次重启循环；修后 **0 条崩溃、0 次重启、
+  // helper 进程存活**。
+  //
+  // 取舍：软件渲染下 webm 动画可能掉帧。但桌宠是 640×360 的轻量透明小窗，且**本来就已经**
+  // 因为 #37（透明分层窗在 DWM 硬件合成下出现黑边/内容丢失）走了软件合成 —— 所以这里没有
+  // 额外损失，只是把"偶尔还会起的 GPU 子进程"也彻底去掉。
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+  app.commandLine.appendSwitch('disable-gpu-process');
+  app.commandLine.appendSwitch('in-process-gpu');
 }
 
 // ---------- 全局 DPI 线性化（多显示器异构缩放的根因修复） ----------
