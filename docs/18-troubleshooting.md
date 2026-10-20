@@ -118,15 +118,16 @@
 ### 冒烟自检（一条命令跑完，进程随命令结束被回收）
 
 ```bash
-cd /d/dev/dsh-pet-agent/dsh-pet && env -u ELECTRON_RUN_AS_NODE DSH_PET_BRIDGE=0 DSH_PET_SMOKE=1 DSH_PET_SMOKE_AFTER_MS=3500 DSH_PET_SMOKE_OUT='D://dev//dsh-pet-agent//pet-smoke.png' DSH_PET_PETS='[{"id":"main","size":462}]' "$USERPROFILE/.dsh/electron/electron.exe" runtime/electron-helper/main.js > /d/dev/dsh-pet-agent/smoke.log 2>&1
+cd /d/dev/dsh-pet-agent/dsh-pet && mkdir -p temp && env -u ELECTRON_RUN_AS_NODE DSH_PET_BRIDGE=0 DSH_PET_SMOKE=1 DSH_PET_SMOKE_AFTER_MS=3500 DSH_PET_SMOKE_OUT='D:/dev/dsh-pet-agent/dsh-pet/temp/smoke.png' DSH_PET_PETS='[{"id":"main","size":462}]' "$USERPROFILE/.dsh/electron/electron.exe" runtime/electron-helper/main.js > temp/smoke.log 2>&1
 ```
 
-然后看 `smoke.log`：
+产物写到 `dsh-pet/temp/`（该目录已被 `.gitignore` 的 `temp/` 忽略，不会污染工作区）。然后看 `temp/smoke.log`：
 
 ```bash
-grep -o '"menuSmoke":{[^}]*}' /d/dev/dsh-pet-agent/smoke.log
-grep -c 'renderer:error' /d/dev/dsh-pet-agent/smoke.log
-grep -o '"errors":\[[^]]*\]' /d/dev/dsh-pet-agent/smoke.log
+cd /d/dev/dsh-pet-agent/dsh-pet
+grep -o '"menuSmoke":{[^}]*}' temp/smoke.log
+grep -c 'renderer:error' temp/smoke.log
+grep -o '"errors":\[[^]]*\]' temp/smoke.log
 ```
 
 **正常值基准**（实测）：
@@ -149,7 +150,10 @@ grep -o '"errors":\[[^]]*\]' /d/dev/dsh-pet-agent/smoke.log
 顺带能验证独立模式的菜单过滤：`rootText` 里「显示位置」下面**只有「仅桌面」「两者」**，
 没有「仅网页」「都不」——那两个在独立模式是死路（详见 `17-user-guide.md` §桌宠不见了怎么办）。
 
-**菜单没弹时**：`menuMounted` 会是 `false`、`threw` 会带异常信息，`renderer:error` 会有行。
+**菜单没弹时**（实测故障态，供对照）：`menuMounted:false`、`errsNew:1`、
+`renderer:error` 有 1 行、`"errors":["Uncaught ReferenceError: ..."]`。
+注意 **`threw` 仍然是 `null`** —— 异常被 `window.onerror` 捕获，不会被派发处的 try/catch 接住，
+所以「`threw` 为 null」**不能**当作「没出错」的证据，要看 `errsNew` / `errors` / `renderer:error`。
 
 ### 两个必须知道的坑
 
