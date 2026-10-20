@@ -45,8 +45,14 @@ try {
   );
   process.exit(3);
 }
-const { app, BrowserWindow, ipcMain, screen, shell, protocol } = electronApi;
+const { app, BrowserWindow, ipcMain, screen, shell, protocol, Tray, Menu, nativeImage } = electronApi;
+
+// 任务栏归组与图标身份：没有 AppUserModelID 时，Windows 任务栏会把每个 Electron 窗口
+// 当成独立的 "Electron" 应用，图标与归组都不对（悬停预览也叫 Electron）。
+app.setAppUserModelId('com.dsh.pet.helper');
 const path = require('node:path');
+
+const { trayMenuModel, shouldStopServiceOnQuit, TRAY_TOOLTIP } = require('./tray-menu');
 const { execFileSync } = require('node:child_process');
 const { readFileSync, writeFileSync } = require('node:fs');
 const fsPromises = require('node:fs/promises');
@@ -285,6 +291,24 @@ function petScale() {
 /** bridge 模式：DSH_PET_BRIDGE=1（宿主注入）。开启时注册 dsh-pet-bridge scheme + 管道转发 */
 const BRIDGE = process.env.DSH_PET_BRIDGE === '1';
 
+/** 服务 configUrl（唯一来源；第 427 行的局部变量也引用它，避免两套口径漂移） */
+const SERVICE_CONFIG_URL = process.env.DSH_PET_CONFIG_URL || 'http://127.0.0.1:3080/dsh-pet-7340/config';
+
+/** 服务 origin（托盘里的 /admin 与 /shutdown 都挂在服务根上，端口随 configUrl 变化，绝不写死） */
+function serviceOrigin() {
+  try {
+    return new URL(SERVICE_CONFIG_URL).origin;
+  } catch {
+    return '';
+  }
+}
+
+/** 任务栏/托盘图标（相对包根：helper 在 runtime/electron-helper） */
+const ICON_PATH = path.join(__dirname, '..', '..', 'assets', 'dsh-pet.ico');
+
+/** 托盘引用（模块级持有，防被 GC 掉导致图标消失） */
+let tray = null;
+
 /** 「打开网站」这一项的去向（宿主按自身形态注入）：
  *  'desktop' = 宿主是 DSH 桌面应用 → 唤起桌面应用主窗口；
  *  'site'    = dsh web / 独立模式 / 手写 start-desktop（无该变量）→ 原行为：默认浏览器打开站点。 */
@@ -421,10 +445,118 @@ function deskGeometry() {
   return buildDeskGeometry(screen.getAllDisplays(), screen.getPrimaryDisplay().id, process.platform);
 }
 
+// ---------- 任务栏 / 托盘：图形界面的兜底退出入口 ----------
+//
+// 【背景】2026-10 真实事故：右键菜单因渲染端异常挂不出来，而退出入口**只有右键菜单**
+// → 用户在图形界面上彻底关不掉桌宠，只能靠 curl /shutdown 救。
+// 托盘是主进程对象，不依赖渲染端；任务栏条目则是"拖不到宠物时也点得到"的兜底。
+
+/** 图标文件在不在（不在就省略 icon，绝不因为一个图标让窗口建失败） */
+function iconExists() {
+  try {
+    return require('node:fs').existsSync(ICON_PATH);
+  } catch {
+    return false;
+  }
+}
+
+/** 窗口标题：任务栏按钮/悬停预览要有可辨识的名字 */
+function petWindowTitle(pet) {
+  return 'dsh-pet 桌宠 · ' + (pet && pet.id ? pet.id : 'main');
+}
+
+/** 中转站管理页地址（独立模式才有；端口从 configUrl 推导，绝不写死） */
+function adminPageUrl() {
+  const origin = serviceOrigin();
+  return origin ? origin + '/admin' : '';
+}
+
+/** 托盘菜单模板（模型来自纯模块 tray-menu.js，这里只做 Electron 适配） */
+function buildTrayTemplate() {
+  return trayMenuModel({ bridge: BRIDGE, adminUrl: adminPageUrl() }).map((entry) => {
+    if (entry.type === 'separator') return { type: 'separator' };
+    return { label: entry.label, enabled: entry.enabled, click: () => onTrayAction(entry.id) };
+  });
+}
+
+function onTrayAction(id) {
+  if (id === 'open-admin') {
+    const url = adminPageUrl();
+    if (url) shell.openExternal(url).catch((e) => console.error('[dsh-pet-desktop-helper] open admin failed:', e));
+    return;
+  }
+  if (id === 'reload') {
+    // 与渲染端「重载配置」同一条路径（POST /reload，宿主据此重启 Helper）；fire-and-forget
+    const origin = serviceOrigin();
+    if (!origin) return;
+    fetch(origin + '/reload', { method: 'POST', signal: AbortSignal.timeout(1500) }).catch((e) =>
+      console.warn('[dsh-pet-desktop-helper] tray reload failed:', e && e.message),
+    );
+    return;
+  }
+  if (id === 'quit') quitPetGracefully();
+}
+
+function createTray() {
+  // DPI 探测进程（main.js 自身被 spawn 去量屏幕参数）不建窗口也不建托盘，否则会多出一个图标
+  if (DPI_PROBE) return;
+  if (tray) return;
+  let image = nativeImage.createFromPath(ICON_PATH);
+  if (image.isEmpty()) {
+    console.warn('[dsh-pet-desktop-helper] 托盘图标读不到，改用空图标：', ICON_PATH);
+    image = nativeImage.createEmpty();
+  }
+  tray = new Tray(image);
+  tray.setToolTip(TRAY_TOOLTIP);
+  tray.setContextMenu(Menu.buildFromTemplate(buildTrayTemplate()));
+  // Windows 托盘单击默认没有行为，用户会以为"点了没反应"——弹同一个菜单
+  tray.on('click', () => {
+    if (tray) tray.popUpContextMenu();
+  });
+}
+
+/**
+ * 统一退出路径（托盘「退出」、任务栏关闭窗口、window-all-closed 都走这里）。
+ *
+ * 【为什么窗口关了还要停服务】服务是按配置 spawn 出 helper 的。如果只关窗口、服务还活着，
+ * 用户再双击快捷方式时 `scripts/pet-service.mjs` 会走 `alreadyRunning` 早退分支
+ * ——「服务已在跑、不必新建窗口」→ **宠物彻底消失且无法恢复**。
+ * 所以独立模式退出时必须顺手 `POST /shutdown` 把服务也停掉。
+ *
+ * bridge（DSH）下服务是用户的 DSH，我们无权也不该停它 —— 只关自己的窗口。
+ */
+function quitPetGracefully() {
+  const destroyTray = () => {
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
+  };
+  if (!shouldStopServiceOnQuit({ bridge: BRIDGE })) {
+    destroyTray();
+    app.quit();
+    return;
+  }
+  const origin = serviceOrigin();
+  const finish = () => {
+    destroyTray();
+    app.quit();
+  };
+  if (!origin) {
+    finish();
+    return;
+  }
+  fetch(origin + '/shutdown', { method: 'POST', signal: AbortSignal.timeout(1500) })
+    .catch(() => {
+      // 服务已经没了 / 端口变了：无所谓，照样退出（不能因为停服务失败就把用户困住）
+    })
+    .finally(finish);
+}
+
 function createPetWindows() {
   const geo = deskGeometry();
   const area = geo.hull;
-  const configUrl = process.env.DSH_PET_CONFIG_URL || 'http://127.0.0.1:3080/dsh-pet-7340/config';
+  const configUrl = SERVICE_CONFIG_URL; // 与托盘同一来源，避免口径漂移
   const pets = petsFromEnv();
   const scale = petScale();
   for (const pet of pets) {
@@ -442,9 +574,18 @@ function createPetWindows() {
       transparent: true,
       frame: false,
       alwaysOnTop: true,
-      skipTaskbar: true,
+      // 任务栏条目：用户要求「桌宠启动时任务栏应该有一个进程」，也给了拖不到宠物时的兜底入口
+      skipTaskbar: false,
+      // 透明置顶窗被最小化/最大化会诡异地消失或铺满整屏，全部禁掉
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
       resizable: false,
       hasShadow: false,
+      // 图标文件存在才传（不存在就省略，绝不因为一个图标把窗口建失败）
+      ...(iconExists() ? { icon: ICON_PATH } : {}),
+      // 任务栏按钮/悬停预览的可辨识名字（index.html 的 <title> 会在加载后覆盖，did-finish-load 里再设）
+      title: petWindowTitle(pet),
       // 可聚焦：对话输入框/菜单需要窗口焦点才能打字（focusable:false 会让输入框永远无法聚焦）。
       // 显示时使用 showInactive()，不打断其它应用；用户主动点对话输入框时仍然允许获得焦点。
       focusable: true,
@@ -471,6 +612,9 @@ function createPetWindows() {
     // webPreferences.zoomFactor 对 show:false 的窗口不生效（实测），须在加载完成后设置。
     win.webContents.on('did-finish-load', () => {
       win.webContents.setZoomFactor(scale);
+      // index.html 的 <title> 会在加载完成后覆盖建窗时设的标题，这里再设一次：
+      // 任务栏按钮/悬停预览要有可辨识的名字，不能是一个空白的 Electron 窗口
+      win.setTitle(petWindowTitle(pet));
     });
     // 默认整窗点击穿透（renderer 在光标进/出身体命中区时经 IPC 翻转可交互）；
     // forward:true 保证穿透期间 mousemove 仍转发进渲染端做命中判定。
@@ -698,6 +842,7 @@ app.whenReady().then(() => {
   }
 
   createPetWindows();
+  createTray();
 
   // 宠物窗口跟随：renderer 逐帧上报窗口内容区位置/尺寸
   ipcMain.on('pet:set-bounds', (event, bounds) => {
@@ -1081,6 +1226,16 @@ app.whenReady().then(() => {
               return out;
             })(),
           }))()`);
+          // 托盘状态（主进程对象，只能在这里补；渲染端 dump 里拿不到）
+          dump.tray = tray
+            ? {
+                present: true,
+                tooltip: TRAY_TOOLTIP,
+                labels: trayMenuModel({ bridge: BRIDGE, adminUrl: adminPageUrl() }).map(
+                  (i) => i.label ?? i.type,
+                ),
+              }
+            : { present: false };
           console.log(
             '[dsh-pet-desktop-helper] smoke dump: windows=' +
               windows.size +
@@ -1118,5 +1273,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  app.quit();
+  // 绝不裸调 app.quit()：独立模式下服务还活着的话，再双击快捷方式会走 alreadyRunning 早退，
+  // 宠物彻底消失且无法恢复（详见 quitPetGracefully 的注释）。这里必须顺便把服务停掉。
+  quitPetGracefully();
 });
