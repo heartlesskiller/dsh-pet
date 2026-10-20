@@ -161,3 +161,44 @@ grep -o '"errors":\[[^]]*\]' temp/smoke.log
    Electron 会被当成纯 Node 拉起，直接报「本进程被以纯 Node 模式拉起」然后退出 —— 什么都没测。
 2. **`DSH_PET_SMOKE=1` 是唯一能拿到渲染端错误与菜单断言的通路**。
    `launcher.log` 里看不到渲染异常（只有 GPU 告警和碎碎念失败），别在那儿找。
+
+## 桌宠关不掉 / 退不掉
+
+**症状**：桌面上的宠物还在，但右键没菜单、找不到「退出桌宠」，或者点了「退出桌宠」窗口不消失。
+
+**为什么必须留一条命令行退路**：桌宠的退出入口**只有右键菜单**。一旦渲染端出错（例如
+上一节那种裸调用异常）菜单就挂不出来 —— 而这时进程还活着、还占着屏幕，用户在图形界面上
+**没有任何办法关掉它**。所以下面这条命令要记住。
+
+### 优雅停止（推荐，与菜单「退出桌宠」走**同一条**路径）
+
+```bash
+curl -s -X POST http://127.0.0.1:3080/shutdown -w "\nHTTP %{http_code}\n"
+```
+
+返回 `{"ok":true,"stopping":true}` 且 `HTTP 200` 即成功。服务随后退出，桌面 Helper 因
+宿主消失而自行退出（内置宿主 PID 看守），宠物窗口一并消失。
+
+端口不是 3080（被占时启动器会报 `LaunchFailure`，不会静默顺延）时，端口写在：
+
+```bash
+cat "$USERPROFILE/.dsh/dsh-pet/standalone.lock"
+```
+
+### 强制停止（服务也挂了、端口不通时的兜底）
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='electron.exe'" |
+  Where-Object { $_.CommandLine -like '*dsh-pet*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+⚠️ **必须带 `-like '*dsh-pet*'` 这个过滤**：本机还有其他 Electron 应用（编辑器、聊天工具等），
+按进程名一把杀会把它们一起杀掉。
+
+### 几个说明
+
+- 停止**不会**丢配置：中转站、余额、显示位置都在 `%USERPROFILE%\.dsh\dsh-pet\` 下，重开即恢复。
+- 正常停机后 `standalone.lock` 会被清掉；若残留了旧锁，启动器会按端口占用情况重新判定，不会因此起不来。
+- 重开就是双击桌面那个快捷方式（它每次都会检测构建是否陈旧，陈旧则先重建再拉起）。
+
