@@ -102,3 +102,58 @@
 | 桌宠不见了 / 双击「桌宠」没反应 | `17-user-guide.md` §「桌宠不见了怎么办」—— 90% 是 display 设成了 none 或 web，启动器会自动改回「桌面显示」并留备份；桌宠已在跑时按提示「重载配置」 |
 | 每个站点字段填错了会怎样 | `08-site-setup-checklist.md` |
 | DSH 插件形态怎么上手 | `09-onboarding.md` |
+
+## 右键点桌宠没有任何反应
+
+**症状**：右键点桌宠，菜单完全不弹；没有任何报错弹窗，`launcher.log` 里也看不出问题。
+
+**真实原因类型**：渲染端（`runtime/electron-helper/sprite.js`）在 `onContextMenu` 里抛了异常
+→ 菜单树在挂载之前就中断了。典型如裸调用类方法
+（写成 `displayBranchForMode(),` 而不是 `this.displayBranchForMode(),`）会抛
+`Uncaught ReferenceError: displayBranchForMode is not defined`。
+
+**为什么难查**：渲染进程的异常**不会进 `launcher.log`** —— 那里只有 Electron 的 GPU 告警和
+「碎碎念生成失败」这类宿主侧日志。必须用下面的冒烟自检才能拿到渲染端错误与菜单断言。
+
+### 冒烟自检（一条命令跑完，进程随命令结束被回收）
+
+```bash
+cd /d/dev/dsh-pet-agent/dsh-pet && env -u ELECTRON_RUN_AS_NODE DSH_PET_BRIDGE=0 DSH_PET_SMOKE=1 DSH_PET_SMOKE_AFTER_MS=3500 DSH_PET_SMOKE_OUT='D://dev//dsh-pet-agent//pet-smoke.png' DSH_PET_PETS='[{"id":"main","size":462}]' "$USERPROFILE/.dsh/electron/electron.exe" runtime/electron-helper/main.js > /d/dev/dsh-pet-agent/smoke.log 2>&1
+```
+
+然后看 `smoke.log`：
+
+```bash
+grep -o '"menuSmoke":{[^}]*}' /d/dev/dsh-pet-agent/smoke.log
+grep -c 'renderer:error' /d/dev/dsh-pet-agent/smoke.log
+grep -o '"errors":\[[^]]*\]' /d/dev/dsh-pet-agent/smoke.log
+```
+
+**正常值基准**（实测）：
+
+| 指标 | 正常值 |
+|---|---|
+| `renderer:error` 行数 | `0` |
+| `"errors"` | `[]` |
+| `menuSmoke.menuMounted` | `true` |
+| `menuSmoke.menuOpen` | `true` |
+| `menuSmoke.errsNew` | `0` |
+| `menuSmoke.threw` | `null` |
+
+实测正常输出片段：
+
+```
+"menuSmoke":{"threw":null,"menuMounted":true,"menuOpen":true,"rootText":"打开网站查看余额碎碎念对话回到初始位置显示位置▸中转站管理…退出桌宠重载配置动作▸仅桌面两者待机▸…","errsNew":0,"panelCount":16,"lvl2AfterHoverRoot":2}
+```
+
+顺带能验证独立模式的菜单过滤：`rootText` 里「显示位置」下面**只有「仅桌面」「两者」**，
+没有「仅网页」「都不」——那两个在独立模式是死路（详见 `17-user-guide.md` §桌宠不见了怎么办）。
+
+**菜单没弹时**：`menuMounted` 会是 `false`、`threw` 会带异常信息，`renderer:error` 会有行。
+
+### 两个必须知道的坑
+
+1. **本机 shell 带 `ELECTRON_RUN_AS_NODE=1`**。不 `env -u ELECTRON_RUN_AS_NODE` 掉，
+   Electron 会被当成纯 Node 拉起，直接报「本进程被以纯 Node 模式拉起」然后退出 —— 什么都没测。
+2. **`DSH_PET_SMOKE=1` 是唯一能拿到渲染端错误与菜单断言的通路**。
+   `launcher.log` 里看不到渲染异常（只有 GPU 告警和碎碎念失败），别在那儿找。
